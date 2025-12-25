@@ -1,7 +1,9 @@
 use alloc::boxed::Box;
 
+use crate::hb::unicode::Codepoint;
+
 use super::algs::*;
-use super::buffer::hb_buffer_t;
+use super::buffer::*;
 use super::ot_layout::*;
 use super::ot_map::*;
 use super::ot_shape::*;
@@ -9,8 +11,9 @@ use super::ot_shape_normalize::*;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::ot_shaper::*;
 use super::ot_shaper_arabic::arabic_shape_plan_t;
-use super::unicode::{CharExt, GeneralCategoryExt};
-use super::{hb_font_t, hb_glyph_info_t, hb_mask_t, hb_tag_t, script, Script};
+use super::ot_shaper_syllabic::*;
+use super::unicode::CharExt;
+use super::{hb_font_t, hb_mask_t, hb_tag_t, script, GlyphInfo, Script};
 
 pub const UNIVERSAL_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
     collect_features: Some(collect_features),
@@ -27,6 +30,23 @@ pub const UNIVERSAL_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
     zero_width_marks: HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY,
     fallback_position: false,
 };
+
+impl GlyphInfo {
+    declare_buffer_var_alias!(
+        OT_SHAPER_VAR_U8_CATEGORY_VAR,
+        u8,
+        USE_CATEGORY_VAR,
+        use_category,
+        set_use_category
+    );
+
+    fn is_halant_use(&self) -> bool {
+        matches!(
+            self.use_category(),
+            category::H | category::HVM | category::IS
+        ) && !self.ligated()
+    }
+}
 
 pub type Category = u8;
 #[allow(dead_code)]
@@ -106,7 +126,7 @@ pub mod category {
 
 // These features are applied all at once, before reordering,
 // constrained to the syllable.
-const BASIC_FEATURES: &[hb_tag_t] = &[
+static BASIC_FEATURES: &[hb_tag_t] = &[
     hb_tag_t::new(b"rkrf"),
     hb_tag_t::new(b"abvf"),
     hb_tag_t::new(b"blwf"),
@@ -116,7 +136,7 @@ const BASIC_FEATURES: &[hb_tag_t] = &[
     hb_tag_t::new(b"cjct"),
 ];
 
-const TOPOGRAPHICAL_FEATURES: &[hb_tag_t] = &[
+static TOPOGRAPHICAL_FEATURES: &[hb_tag_t] = &[
     hb_tag_t::new(b"isol"),
     hb_tag_t::new(b"init"),
     hb_tag_t::new(b"medi"),
@@ -133,30 +153,13 @@ enum JoiningForm {
 }
 
 // These features are applied all at once, after reordering and clearing syllables.
-const OTHER_FEATURES: &[hb_tag_t] = &[
+static OTHER_FEATURES: &[hb_tag_t] = &[
     hb_tag_t::new(b"abvs"),
     hb_tag_t::new(b"blws"),
     hb_tag_t::new(b"haln"),
     hb_tag_t::new(b"pres"),
     hb_tag_t::new(b"psts"),
 ];
-
-impl hb_glyph_info_t {
-    pub(crate) fn use_category(&self) -> Category {
-        self.ot_shaper_var_u8_category()
-    }
-
-    fn set_use_category(&mut self, c: Category) {
-        self.set_ot_shaper_var_u8_category(c)
-    }
-
-    fn is_halant_use(&self) -> bool {
-        matches!(
-            self.use_category(),
-            category::H | category::HVM | category::IS
-        ) && !_hb_glyph_info_ligated(self)
-    }
-}
 
 struct UniversalShapePlan {
     rphf_mask: hb_mask_t,
@@ -199,14 +202,14 @@ fn collect_features(planner: &mut hb_ot_shape_planner_t) {
     // Reordering group
     planner
         .ot_map
-        .add_gsub_pause(Some(crate::hb::ot_layout::_hb_clear_substitution_flags));
+        .add_gsub_pause(Some(_hb_clear_substitution_flags));
     planner
         .ot_map
         .add_feature(hb_tag_t::new(b"rphf"), F_MANUAL_ZWJ | F_PER_SYLLABLE, 1);
     planner.ot_map.add_gsub_pause(Some(record_rphf));
     planner
         .ot_map
-        .add_gsub_pause(Some(crate::hb::ot_layout::_hb_clear_substitution_flags));
+        .add_gsub_pause(Some(_hb_clear_substitution_flags));
     planner
         .ot_map
         .enable_feature(hb_tag_t::new(b"pref"), F_MANUAL_ZWJ | F_PER_SYLLABLE, 1);
@@ -235,6 +238,8 @@ fn collect_features(planner: &mut hb_ot_shape_planner_t) {
 }
 
 fn setup_syllables(plan: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) -> bool {
+    buffer.allocate_var(GlyphInfo::SYLLABLE_VAR);
+
     super::ot_shaper_use_machine::find_syllables(buffer);
 
     foreach_syllable!(buffer, start, end, {
@@ -362,7 +367,7 @@ fn record_rphf(plan: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_
                 break;
             }
 
-            if _hb_glyph_info_substituted(&buffer.info[i]) {
+            if buffer.info[i].substituted() {
                 buffer.info[i].set_use_category(category::R);
                 break;
             }
@@ -380,7 +385,7 @@ fn reorder_use(_: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buffer_
 
     let mut ret = false;
 
-    if crate::hb::ot_shaper_syllabic::insert_dotted_circles(
+    if insert_dotted_circles(
         face,
         buffer,
         SyllableType::BrokenCluster as u8,
@@ -398,6 +403,8 @@ fn reorder_use(_: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buffer_
         start = end;
         end = buffer.next_syllable(start);
     }
+
+    buffer.deallocate_var(GlyphInfo::USE_CATEGORY_VAR);
 
     ret
 }
@@ -483,7 +490,7 @@ fn reorder_syllable_use(start: usize, end: usize, buffer: &mut hb_buffer_t) {
             // shift things in between forward.
             j = i + 1;
         } else if (flag & (category_flag(category::VPre) | category_flag(category::VMPre))) != 0
-            && _hb_glyph_info_get_lig_comp(&buffer.info[i]) == 0
+            && buffer.info[i].lig_comp() == 0
             && j < i
         {
             // Only move the first component of a MultipleSubst.
@@ -503,7 +510,7 @@ fn record_pref(_: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) 
     while start < buffer.len {
         // Mark a substituted pref as VPre, as they behave the same way.
         for i in start..end {
-            if _hb_glyph_info_substituted(&buffer.info[i]) {
+            if buffer.info[i].substituted() {
                 buffer.info[i].set_use_category(category::VPre);
                 break;
             }
@@ -540,7 +547,7 @@ fn preprocess_text(_: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer
     super::ot_shaper_vowel_constraints::preprocess_text_vowel_constraints(buffer);
 }
 
-fn compose(_: &hb_ot_shape_normalize_context_t, a: char, b: char) -> Option<char> {
+fn compose(_: &hb_ot_shape_normalize_context_t, a: Codepoint, b: Codepoint) -> Option<Codepoint> {
     // Avoid recomposing split matras.
     if a.general_category().is_mark() {
         return None;
@@ -557,11 +564,13 @@ fn setup_masks(plan: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_
         crate::hb::ot_shaper_arabic::setup_masks_inner(arabic_plan, plan.script, buffer);
     }
 
+    buffer.allocate_var(GlyphInfo::USE_CATEGORY_VAR);
+
     // We cannot setup masks here. We save information about characters
     // and setup masks later on in a pause-callback.
     for info in buffer.info_slice_mut() {
         info.set_use_category(super::ot_shaper_use_table::hb_use_get_category(
-            info.glyph_id,
+            info.glyph_id as usize,
         ));
     }
 }

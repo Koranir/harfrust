@@ -1,13 +1,14 @@
+use super::aat::map::*;
 use super::buffer::*;
 use super::ot_layout::*;
 use super::ot_layout_gpos_table::GPOS;
 use super::ot_map::*;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::ot_shaper::*;
-use super::unicode::{hb_unicode_general_category_t, CharExt, GeneralCategoryExt};
+use super::unicode::CharExt;
 use super::*;
 use super::{hb_font_t, hb_tag_t};
-use crate::hb::aat_layout::hb_aat_layout_remove_deleted_glyphs;
+use crate::hb::aat;
 use crate::hb::algs::{rb_flag, rb_flag_unsafe};
 use crate::hb::buffer::glyph_flag::{SAFE_TO_INSERT_TATWEEL, UNSAFE_TO_BREAK, UNSAFE_TO_CONCAT};
 use crate::hb::unicode::hb_gc::{
@@ -15,19 +16,23 @@ use crate::hb::unicode::hb_gc::{
     HB_UNICODE_GENERAL_CATEGORY_SPACE_SEPARATOR, HB_UNICODE_GENERAL_CATEGORY_TITLECASE_LETTER,
     HB_UNICODE_GENERAL_CATEGORY_UPPERCASE_LETTER,
 };
+use crate::hb::unicode::GeneralCategory;
 use crate::BufferClusterLevel;
 use crate::BufferFlags;
 use crate::{Direction, Feature, Language, Script};
+use core::ptr;
 use read_fonts::TableProvider;
 
 pub struct hb_ot_shape_planner_t<'a> {
     pub face: &'a hb_font_t<'a>,
     pub direction: Direction,
     pub script: Option<Script>,
+    pub language: Option<Language>,
     pub ot_map: hb_ot_map_builder_t<'a>,
+    pub aat_map: AatMapBuilder,
     pub apply_morx: bool,
     pub script_zero_marks: bool,
-    pub script_fallback_mark_positioning: bool,
+    pub script_fallback_position: bool,
     pub shaper: &'static hb_ot_shaper_t,
 }
 
@@ -39,6 +44,7 @@ impl<'a> hb_ot_shape_planner_t<'a> {
         language: Option<&Language>,
     ) -> Self {
         let ot_map = hb_ot_map_builder_t::new(face, script, language);
+        let aat_map = AatMapBuilder::default();
 
         let mut shaper = match script {
             Some(script) => hb_ot_shape_complex_categorize(
@@ -50,14 +56,14 @@ impl<'a> hb_ot_shape_planner_t<'a> {
         };
 
         let script_zero_marks = shaper.zero_width_marks != HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE;
-        let script_fallback_mark_positioning = shaper.fallback_position;
+        let script_fallback_position = shaper.fallback_position;
 
         // https://github.com/harfbuzz/harfbuzz/issues/2124
         let apply_morx = face.aat_tables.morx.is_some()
             && (direction.is_horizontal() || face.ot_tables.gsub.is_none());
 
         // https://github.com/harfbuzz/harfbuzz/issues/1528
-        if apply_morx && !core::ptr::eq(shaper as *const _, &DEFAULT_SHAPER as *const _) {
+        if apply_morx && !ptr::eq(ptr::from_ref(shaper), ptr::from_ref(&DEFAULT_SHAPER)) {
             shaper = &DUMBER_SHAPER;
         }
 
@@ -65,16 +71,18 @@ impl<'a> hb_ot_shape_planner_t<'a> {
             face,
             direction,
             script,
+            language: language.cloned(),
             ot_map,
+            aat_map,
             apply_morx,
             script_zero_marks,
-            script_fallback_mark_positioning,
+            script_fallback_position,
             shaper,
         }
     }
 
     pub fn collect_features(&mut self, user_features: &[Feature]) {
-        const COMMON_FEATURES: &[(hb_tag_t, hb_ot_map_feature_flags_t)] = &[
+        static COMMON_FEATURES: &[(hb_tag_t, hb_ot_map_feature_flags_t)] = &[
             (hb_tag_t::new(b"abvm"), F_GLOBAL),
             (hb_tag_t::new(b"blwm"), F_GLOBAL),
             (hb_tag_t::new(b"ccmp"), F_GLOBAL),
@@ -84,7 +92,7 @@ impl<'a> hb_ot_shape_planner_t<'a> {
             (hb_tag_t::new(b"rlig"), F_GLOBAL),
         ];
 
-        const HORIZONTAL_FEATURES: &[(hb_tag_t, hb_ot_map_feature_flags_t)] = &[
+        static HORIZONTAL_FEATURES: &[(hb_tag_t, hb_ot_map_feature_flags_t)] = &[
             (hb_tag_t::new(b"calt"), F_GLOBAL),
             (hb_tag_t::new(b"clig"), F_GLOBAL),
             (hb_tag_t::new(b"curs"), F_GLOBAL),
@@ -174,8 +182,12 @@ impl<'a> hb_ot_shape_planner_t<'a> {
         }
     }
 
-    pub fn compile(mut self) -> hb_ot_shape_plan_t {
+    pub fn compile(mut self, features: &[Feature]) -> hb_ot_shape_plan_t {
         let ot_map = self.ot_map.compile();
+        let mut aat_map = AatMap::default();
+        if self.apply_morx {
+            self.aat_map.compile(self.face, &mut aat_map);
+        }
 
         let frac_mask = ot_map.get_1_mask(hb_tag_t::new(b"frac"));
         let numr_mask = ot_map.get_1_mask(hb_tag_t::new(b"numr"));
@@ -227,7 +239,7 @@ impl<'a> hb_ot_shape_planner_t<'a> {
             if has_kerx {
                 apply_kerx = true;
             } else if hb_ot_layout_has_kerning(self.face) {
-                apply_kern = true;
+                apply_kern = self.script_fallback_position;
             }
         }
 
@@ -243,7 +255,7 @@ impl<'a> hb_ot_shape_planner_t<'a> {
             && (!apply_kern || !hb_ot_layout_has_cross_kerning(self.face));
 
         let fallback_mark_positioning =
-            adjust_mark_positioning_when_zeroing && self.script_fallback_mark_positioning;
+            adjust_mark_positioning_when_zeroing && self.script_fallback_position;
 
         // If we're using morx shaping, we cancel mark position adjustment because
         // Apple Color Emoji assumes this will NOT be done when forming emoji sequences;
@@ -266,8 +278,10 @@ impl<'a> hb_ot_shape_planner_t<'a> {
         let mut plan = hb_ot_shape_plan_t {
             direction: self.direction,
             script: self.script,
+            language: self.language,
             shaper: self.shaper,
             ot_map,
+            aat_map,
             data: None,
             frac_mask,
             numr_mask,
@@ -288,6 +302,7 @@ impl<'a> hb_ot_shape_planner_t<'a> {
             apply_kerx,
             apply_morx,
             apply_trak,
+            user_features: features.into(),
         };
 
         if let Some(func) = self.shaper.create_data {
@@ -309,7 +324,7 @@ pub struct hb_ot_shape_context_t<'a> {
 
 // Pull it all together!
 pub fn shape_internal(ctx: &mut hb_ot_shape_context_t) {
-    ctx.buffer.enter();
+    ctx.buffer.allocate_unicode_vars();
 
     initialize_masks(ctx);
     set_unicode_props(ctx.buffer);
@@ -329,22 +344,26 @@ pub fn shape_internal(ctx: &mut hb_ot_shape_context_t) {
 
     propagate_flags(ctx.buffer);
 
+    ctx.buffer.deallocate_unicode_vars();
+
     ctx.buffer.direction = ctx.target_direction;
-    ctx.buffer.leave();
 }
 
 fn substitute_pre(ctx: &mut hb_ot_shape_context_t) {
     hb_ot_substitute_default(ctx);
+
+    ctx.buffer.allocate_gsubgpos_vars();
+
     hb_ot_substitute_plan(ctx);
 
     if ctx.plan.apply_morx && ctx.plan.apply_gpos {
-        hb_aat_layout_remove_deleted_glyphs(ctx.buffer);
+        aat::layout::remove_deleted_glyphs(ctx.buffer);
     }
 }
 
 fn substitute_post(ctx: &mut hb_ot_shape_context_t) {
     if ctx.plan.apply_morx && !ctx.plan.apply_gpos {
-        aat_layout::hb_aat_layout_remove_deleted_glyphs(ctx.buffer);
+        aat::layout::remove_deleted_glyphs(ctx.buffer);
     }
 
     deal_with_variation_selectors(ctx.buffer);
@@ -358,6 +377,9 @@ fn substitute_post(ctx: &mut hb_ot_shape_context_t) {
 fn hb_ot_substitute_default(ctx: &mut hb_ot_shape_context_t) {
     rotate_chars(ctx);
 
+    ctx.buffer
+        .allocate_var(GlyphInfo::NORMALIZER_GLYPH_INDEX_VAR);
+
     ot_shape_normalize::_hb_ot_shape_normalize(ctx.plan, ctx.buffer, ctx.face);
 
     setup_masks(ctx);
@@ -370,6 +392,9 @@ fn hb_ot_substitute_default(ctx: &mut hb_ot_shape_context_t) {
     }
 
     map_glyphs_fast(ctx.buffer);
+
+    ctx.buffer
+        .deallocate_var(GlyphInfo::NORMALIZER_GLYPH_INDEX_VAR);
 }
 
 fn hb_ot_substitute_plan(ctx: &mut hb_ot_shape_context_t) {
@@ -380,9 +405,11 @@ fn hb_ot_substitute_plan(ctx: &mut hb_ot_shape_context_t) {
     }
 
     if ctx.plan.apply_morx {
-        aat_layout::hb_aat_layout_substitute(ctx.plan, ctx.face, ctx.buffer, ctx.features);
+        aat::layout::substitute(ctx.plan, ctx.face, ctx.buffer, ctx.features);
+        ctx.buffer.update_digest();
     } else {
-        super::ot_layout_gsub_table::substitute(ctx.plan, ctx.face, ctx.buffer);
+        ctx.buffer.update_digest();
+        ot_layout_gsub_table::substitute(ctx.plan, ctx.face, ctx.buffer);
     }
 }
 
@@ -396,18 +423,15 @@ fn position(ctx: &mut hb_ot_shape_context_t) {
     if ctx.buffer.direction.is_backward() {
         ctx.buffer.reverse();
     }
+
+    ctx.buffer.deallocate_gsubgpos_vars();
 }
 
 fn position_default(ctx: &mut hb_ot_shape_context_t) {
     let len = ctx.buffer.len;
 
     if ctx.buffer.direction.is_horizontal() {
-        for (info, pos) in ctx.buffer.info[..len]
-            .iter()
-            .zip(&mut ctx.buffer.pos[..len])
-        {
-            pos.x_advance = ctx.face.glyph_h_advance(info.as_glyph());
-        }
+        ctx.face.glyph_h_advances(ctx.buffer);
     } else {
         for (info, pos) in ctx.buffer.info[..len]
             .iter()
@@ -458,11 +482,6 @@ fn position_complex(ctx: &mut hb_ot_shape_context_t) {
     // Finish off.  Has to follow a certain order.
     GPOS::position_finish_advances(ctx.face, ctx.buffer);
     zero_width_default_ignorables(ctx.buffer);
-
-    if ctx.plan.apply_morx {
-        aat_layout::hb_aat_layout_zero_width_deleted_glyphs(ctx.buffer);
-    }
-
     GPOS::position_finish_offsets(ctx.face, ctx.buffer);
 
     if ctx.plan.fallback_mark_positioning {
@@ -477,18 +496,18 @@ fn position_complex(ctx: &mut hb_ot_shape_context_t) {
 
 fn position_by_plan(plan: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buffer_t) {
     if plan.apply_gpos {
-        super::ot_layout_gpos_table::position(plan, face, buffer);
+        ot_layout_gpos_table::position(plan, face, buffer);
     } else if plan.apply_kerx {
-        aat_layout::hb_aat_layout_position(plan, face, buffer);
+        aat::layout::position(plan, face, buffer);
     }
     if plan.apply_kern {
-        super::kerning::hb_ot_layout_kern(plan, face, buffer);
+        kerning::hb_ot_layout_kern(plan, face, buffer);
     } else if plan.apply_fallback_kern {
         ot_shape_fallback::_hb_ot_shape_fallback_kern(plan, face, buffer);
     }
 
     if plan.apply_trak {
-        aat_layout::hb_aat_layout_track(plan, face, buffer);
+        aat::layout::track(plan, face, buffer);
     }
 }
 
@@ -515,7 +534,7 @@ fn setup_masks(ctx: &mut hb_ot_shape_context_t) {
 
 fn setup_masks_fraction(ctx: &mut hb_ot_shape_context_t) {
     let buffer = &mut ctx.buffer;
-    if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_NON_ASCII == 0 || !ctx.plan.has_frac {
+    if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_FRACTION_SLASH == 0 || !ctx.plan.has_frac {
         return;
     }
 
@@ -538,16 +557,14 @@ fn setup_masks_fraction(ctx: &mut hb_ot_shape_context_t) {
         if buffer.info[i].glyph_id == 0x2044 {
             let mut start = i;
             while start > 0
-                && _hb_glyph_info_get_general_category(&buffer.info[start - 1])
-                    == hb_unicode_general_category_t::DecimalNumber
+                && buffer.info[start - 1].general_category() == GeneralCategory::DECIMAL_NUMBER
             {
                 start -= 1;
             }
 
             let mut end = i + 1;
             while end < len
-                && _hb_glyph_info_get_general_category(&buffer.info[end])
-                    == hb_unicode_general_category_t::DecimalNumber
+                && buffer.info[end].general_category() == GeneralCategory::DECIMAL_NUMBER
             {
                 end += 1;
             }
@@ -597,16 +614,17 @@ fn set_unicode_props(buffer: &mut hb_buffer_t) {
 
     let mut i = 0;
     while i < len {
-        // Mutably borrow buffer.info[i] and immutably borrow
-        // buffer.info[i - 1] (if present) in a way that the borrow
-        // checker can understand.
-        let (prior, later) = buffer.info.split_at_mut(i);
-        let info = &mut later[0];
+        let info = &mut buffer.info[i];
         info.init_unicode_props(&mut buffer.scratch_flags);
 
-        let gen_cat = _hb_glyph_info_get_general_category(info);
+        if info.glyph_id < 0x80 {
+            i += 1;
+            continue;
+        }
 
-        if (rb_flag_unsafe(gen_cat.to_u32())
+        let gen_cat = info.general_category();
+
+        if (rb_flag_unsafe(gen_cat.to_u8() as u32)
             & (rb_flag(HB_UNICODE_GENERAL_CATEGORY_LOWERCASE_LETTER)
                 | rb_flag(HB_UNICODE_GENERAL_CATEGORY_UPPERCASE_LETTER)
                 | rb_flag(HB_UNICODE_GENERAL_CATEGORY_TITLECASE_LETTER)
@@ -618,25 +636,30 @@ fn set_unicode_props(buffer: &mut hb_buffer_t) {
             continue;
         }
 
+        // Mutably borrow buffer.info[i] and immutably borrow
+        // buffer.info[i - 1] (if present) in a way that the borrow
+        // checker can understand.
+        let (prior, later) = buffer.info.split_at_mut(i);
+        let info = &mut later[0];
+
         // Marks are already set as continuation by the above line.
         // Handle Emoji_Modifier and ZWJ-continuation.
-        if gen_cat == hb_unicode_general_category_t::ModifierSymbol
-            && matches!(info.glyph_id, 0x1F3FB..=0x1F3FF)
+        if gen_cat == GeneralCategory::MODIFIER_SYMBOL && matches!(info.glyph_id, 0x1F3FB..=0x1F3FF)
         {
-            _hb_glyph_info_set_continuation(info);
+            info.set_continuation(&mut buffer.scratch_flags);
         } else if i != 0 && matches!(info.glyph_id, 0x1F1E6..=0x1F1FF) {
             // Should never fail because we checked for i > 0.
             // TODO: use let chains when they become stable
             let prev = prior.last().unwrap();
-            if matches!(prev.glyph_id, 0x1F1E6..=0x1F1FF) && !_hb_glyph_info_is_continuation(prev) {
-                _hb_glyph_info_set_continuation(info);
+            if matches!(prev.glyph_id, 0x1F1E6..=0x1F1FF) && !prev.is_continuation() {
+                info.set_continuation(&mut buffer.scratch_flags);
             }
-        } else if _hb_glyph_info_is_zwj(info) {
-            _hb_glyph_info_set_continuation(info);
+        } else if info.is_zwj() {
+            info.set_continuation(&mut buffer.scratch_flags);
             if let Some(next) = buffer.info[..len].get_mut(i + 1) {
-                if next.as_char().is_emoji_extended_pictographic() {
+                if next.as_codepoint().is_emoji_extended_pictographic() {
                     next.init_unicode_props(&mut buffer.scratch_flags);
-                    _hb_glyph_info_set_continuation(next);
+                    next.set_continuation(&mut buffer.scratch_flags);
                     i += 1;
                 }
             }
@@ -654,23 +677,15 @@ fn set_unicode_props(buffer: &mut hb_buffer_t) {
             // https://github.com/harfbuzz/harfbuzz/issues/1556
             // Katakana ones were requested:
             // https://github.com/harfbuzz/harfbuzz/issues/3844
-            _hb_glyph_info_set_continuation(info);
+            info.set_continuation(&mut buffer.scratch_flags);
+        } else if info.glyph_id == 0x2044
+        /* FRACTION SLASH */
+        {
+            buffer.scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_FRACTION_SLASH;
         }
 
         i += 1;
     }
-}
-
-pub(crate) fn syllabic_clear_var(
-    _: &hb_ot_shape_plan_t,
-    _: &hb_font_t,
-    buffer: &mut hb_buffer_t,
-) -> bool {
-    for info in &mut buffer.info {
-        info.set_syllable(0);
-    }
-
-    false
 }
 
 fn insert_dotted_circle(buffer: &mut hb_buffer_t, face: &hb_font_t) {
@@ -679,14 +694,14 @@ fn insert_dotted_circle(buffer: &mut hb_buffer_t, face: &hb_font_t) {
         .contains(BufferFlags::DO_NOT_INSERT_DOTTED_CIRCLE)
         && buffer.flags.contains(BufferFlags::BEGINNING_OF_TEXT)
         && buffer.context_len[0] == 0
-        && _hb_glyph_info_is_unicode_mark(&buffer.info[0])
+        && buffer.info[0].is_unicode_mark()
         && face.has_glyph(0x25CC)
     {
-        let mut info = hb_glyph_info_t {
+        let mut info = GlyphInfo {
             glyph_id: 0x25CC,
             mask: buffer.cur(0).mask,
             cluster: buffer.cur(0).cluster,
-            ..hb_glyph_info_t::default()
+            ..GlyphInfo::default()
         };
 
         info.init_unicode_props(&mut buffer.scratch_flags);
@@ -697,7 +712,7 @@ fn insert_dotted_circle(buffer: &mut hb_buffer_t, face: &hb_font_t) {
 }
 
 fn form_clusters(buffer: &mut hb_buffer_t) {
-    if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_NON_ASCII != 0 {
+    if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_CONTINUATIONS != 0 {
         if BufferClusterLevel::new(buffer.cluster_level).is_graphemes() {
             foreach_grapheme!(buffer, start, end, { buffer.merge_clusters(start, end) });
         } else {
@@ -737,8 +752,8 @@ fn ensure_native_direction(buffer: &mut hb_buffer_t) {
         let mut found_letter = false;
         let mut found_ri = false;
         for info in &buffer.info {
-            let gc = _hb_glyph_info_get_general_category(info);
-            if gc == hb_unicode_general_category_t::DecimalNumber {
+            let gc = info.general_category();
+            if gc == GeneralCategory::DECIMAL_NUMBER {
                 found_number = true;
             } else if gc.is_letter() {
                 found_letter = true;
@@ -771,7 +786,7 @@ fn rotate_chars(ctx: &mut hb_ot_shape_context_t) {
         let rtlm_mask = ctx.plan.rtlm_mask;
 
         for info in &mut ctx.buffer.info[..len] {
-            if let Some(c) = info.as_char().mirrored().map(u32::from) {
+            if let Some(c) = info.as_codepoint().mirrored() {
                 if ctx.face.has_glyph(c) {
                     info.glyph_id = c;
                     continue;
@@ -783,7 +798,7 @@ fn rotate_chars(ctx: &mut hb_ot_shape_context_t) {
 
     if ctx.target_direction.is_vertical() && !ctx.plan.has_vert {
         for info in &mut ctx.buffer.info[..len] {
-            if let Some(c) = info.as_char().vertical().map(u32::from) {
+            if let Some(c) = info.as_codepoint().vertical() {
                 if ctx.face.has_glyph(c) {
                     info.glyph_id = c;
                 }
@@ -793,14 +808,14 @@ fn rotate_chars(ctx: &mut hb_ot_shape_context_t) {
 }
 
 fn map_glyphs_fast(buffer: &mut hb_buffer_t) {
-    // Normalization process sets up glyph_index(), we just copy it.
+    // Normalization process sets up normalizer_glyph_index(), we just copy it.
     let len = buffer.len;
     for info in &mut buffer.info[..len] {
-        info.glyph_id = info.glyph_index();
+        info.glyph_id = info.normalizer_glyph_index();
     }
 
     for info in &mut buffer.out_info_mut()[..len] {
-        info.glyph_id = info.glyph_index();
+        info.glyph_id = info.normalizer_glyph_index();
     }
 }
 
@@ -815,9 +830,8 @@ fn hb_synthesize_glyph_classes(buffer: &mut hb_buffer_t) {
         // marks them as non-mark.  Some Mongolian fonts without
         // GDEF rely on this.  Another notable character that
         // this applies to is COMBINING GRAPHEME JOINER.
-        let class = if _hb_glyph_info_get_general_category(info)
-            != hb_unicode_general_category_t::NonspacingMark
-            || _hb_glyph_info_is_default_ignorable(info)
+        let class = if info.general_category() != GeneralCategory::NON_SPACING_MARK
+            || info.is_default_ignorable()
         {
             GlyphPropsFlags::BASE_GLYPH
         } else {
@@ -839,11 +853,14 @@ fn zero_width_default_ignorables(buffer: &mut hb_buffer_t) {
     {
         let len = buffer.len;
         for (info, pos) in buffer.info[..len].iter().zip(&mut buffer.pos[..len]) {
-            if _hb_glyph_info_is_default_ignorable(info) {
+            if info.is_default_ignorable() {
                 pos.x_advance = 0;
                 pos.y_advance = 0;
-                pos.x_offset = 0;
-                pos.y_offset = 0;
+                if buffer.direction.is_horizontal() {
+                    pos.x_offset = 0;
+                } else {
+                    pos.y_offset = 0;
+                }
             }
         }
     }
@@ -865,13 +882,13 @@ fn deal_with_variation_selectors(buffer: &mut hb_buffer_t) {
     let pos = &mut buffer.pos;
 
     for i in 0..count {
-        if _hb_glyph_info_is_variation_selector(&info[i]) {
+        if info[i].is_variation_selector() {
             info[i].glyph_id = nf;
             pos[i].x_advance = 0;
             pos[i].y_advance = 0;
             pos[i].x_offset = 0;
             pos[i].y_offset = 0;
-            _hb_glyph_info_set_variation_selector(&mut info[i], false);
+            info[0].set_variation_selector(false);
         }
     }
 }
@@ -879,7 +896,7 @@ fn deal_with_variation_selectors(buffer: &mut hb_buffer_t) {
 fn zero_mark_widths_by_gdef(buffer: &mut hb_buffer_t, adjust_offsets: bool) {
     let len = buffer.len;
     for (info, pos) in buffer.info[..len].iter().zip(&mut buffer.pos[..len]) {
-        if _hb_glyph_info_is_mark(info) {
+        if info.is_mark() {
             if adjust_offsets {
                 pos.x_offset -= pos.x_advance;
                 pos.y_offset -= pos.y_advance;
@@ -907,7 +924,7 @@ fn hide_default_ignorables(buffer: &mut hb_buffer_t, face: &hb_font_t) {
             {
                 let len = buffer.len;
                 for info in &mut buffer.info[..len] {
-                    if _hb_glyph_info_is_default_ignorable(info) {
+                    if info.is_default_ignorable() {
                         info.glyph_id = invisible.to_u32();
                     }
                 }
@@ -915,7 +932,7 @@ fn hide_default_ignorables(buffer: &mut hb_buffer_t, face: &hb_font_t) {
             }
         }
 
-        buffer.delete_glyphs_inplace(_hb_glyph_info_is_default_ignorable);
+        buffer.delete_glyphs_inplace(GlyphInfo::is_default_ignorable);
     }
 }
 
@@ -923,7 +940,31 @@ fn propagate_flags(buffer: &mut hb_buffer_t) {
     // Propagate cluster-level glyph flags to be the same on all cluster glyphs.
     // Simplifies using them.
 
-    if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_GLYPH_FLAGS == 0 {
+    let mut and_mask = glyph_flag::DEFINED;
+    if !buffer.flags.contains(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT) {
+        and_mask &= !UNSAFE_TO_CONCAT;
+    }
+
+    if !buffer
+        .flags
+        .contains(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL)
+    {
+        foreach_cluster!(buffer, start, end, {
+            if end - start == 1 {
+                buffer.info[start].mask &= and_mask;
+            } else {
+                let mut mask = 0;
+                for info in &buffer.info[start..end] {
+                    mask |= info.mask;
+                }
+
+                mask &= and_mask;
+
+                for info in &mut buffer.info[start..end] {
+                    info.mask = mask;
+                }
+            }
+        });
         return;
     }
 
@@ -935,19 +976,16 @@ fn propagate_flags(buffer: &mut hb_buffer_t) {
      *
      * We couldn't make this interaction earlier. It has to be done here.
      */
-    let flip_tatweel = buffer
-        .flags
-        .contains(BufferFlags::PRODUCE_SAFE_TO_INSERT_TATWEEL);
-
-    let clear_concat = !buffer.flags.contains(BufferFlags::PRODUCE_UNSAFE_TO_CONCAT);
-
     foreach_cluster!(buffer, start, end, {
-        let mut mask = 0;
-        for info in &buffer.info[start..end] {
-            mask |= info.mask & glyph_flag::DEFINED;
-        }
+        // We cannot use `continue` in our `for_each_cluster!` macro.
+        if end - start != 1 {
+            let mut mask = 0;
+            for info in &buffer.info[start..end] {
+                mask |= info.mask;
+            }
 
-        if flip_tatweel {
+            mask &= glyph_flag::DEFINED;
+
             if mask & UNSAFE_TO_BREAK != 0 {
                 mask &= !SAFE_TO_INSERT_TATWEEL;
             }
@@ -955,18 +993,12 @@ fn propagate_flags(buffer: &mut hb_buffer_t) {
             if mask & SAFE_TO_INSERT_TATWEEL != 0 {
                 mask |= UNSAFE_TO_BREAK | UNSAFE_TO_CONCAT;
             }
-        }
 
-        if clear_concat {
-            mask &= !UNSAFE_TO_CONCAT;
+            mask &= and_mask;
 
             for info in &mut buffer.info[start..end] {
                 info.mask = mask;
             }
-        }
-
-        for info in &mut buffer.info[start..end] {
-            info.mask = mask;
         }
     });
 }

@@ -16,9 +16,8 @@
 use core::cell::Cell;
 
 use super::buffer::{hb_buffer_t, HB_BUFFER_SCRATCH_FLAG_HAS_BROKEN_SYLLABLE};
-use super::hb_glyph_info_t;
+use super::GlyphInfo;
 use super::machine_cursor::MachineCursor;
-use super::ot_layout::*;
 use super::ot_shaper_use::category;
 
 %%{
@@ -146,7 +145,7 @@ main := |*
 	numeral_cluster ZWNJ?			=> { found_syllable!(SyllableType::NumeralCluster); };
 	symbol_cluster ZWNJ?			=> { found_syllable!(SyllableType::SymbolCluster); };
 	hieroglyph_cluster ZWNJ?		=> { found_syllable! (SyllableType::HieroglyphCluster); };
-	FMPst* ZWNJ?				=> { found_syllable!(SyllableType::NonCluster); };
+	FMPst					=> { found_syllable!(SyllableType::NonCluster); };
 	broken_cluster ZWNJ?			=> { found_syllable!(SyllableType::BrokenCluster); buffer.scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_BROKEN_SYLLABLE; };
 	other					=> { found_syllable!(SyllableType::NonCluster); };
 *|;
@@ -175,7 +174,7 @@ pub fn find_syllables(buffer: &mut hb_buffer_t) {
     let mut p = p0;
     let mut ts = p0;
     let mut te = p0;
-    let mut act = p0;
+    let mut act = 0;
     let pe = p.end();
     let eof = p.end();
     let mut syllable_serial = 1u8;
@@ -202,7 +201,7 @@ fn found_syllable(
     end: usize,
     syllable_serial: &mut u8,
     kind: SyllableType,
-    buffer: &[Cell<hb_glyph_info_t>],
+    buffer: &[Cell<GlyphInfo>],
 ) {
     for i in start..end {
         let mut glyph = buffer[i].get();
@@ -217,11 +216,11 @@ fn found_syllable(
     }
 }
 
-fn not_ccs_default_ignorable(i: &hb_glyph_info_t) -> bool {
+fn not_ccs_default_ignorable(i: &GlyphInfo) -> bool {
     i.use_category() != category::CGJ
 }
 
-fn included(infos: &[Cell<hb_glyph_info_t>], i: usize) -> bool {
+fn included(infos: &[Cell<GlyphInfo>], i: usize) -> bool {
     let glyph = infos[i].get();
     if !not_ccs_default_ignorable(&glyph) {
         return false;
@@ -229,7 +228,7 @@ fn included(infos: &[Cell<hb_glyph_info_t>], i: usize) -> bool {
     if glyph.use_category() == category::ZWNJ {
         for glyph2 in &infos[i + 1..] {
             if not_ccs_default_ignorable(&glyph2.get()) {
-                return !_hb_glyph_info_is_unicode_mark(&glyph2.get());
+                return !glyph2.get().is_unicode_mark();
             }
         }
     }

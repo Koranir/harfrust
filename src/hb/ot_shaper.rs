@@ -1,6 +1,8 @@
 use alloc::boxed::Box;
 use core::any::Any;
 
+use crate::hb::unicode::Codepoint;
+
 use super::buffer::*;
 use super::common::TagExt;
 use super::ot_shape::*;
@@ -8,26 +10,23 @@ use super::ot_shape_normalize::*;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::{hb_font_t, hb_tag_t, script, Direction, Script};
 
-impl hb_glyph_info_t {
-    pub(crate) fn ot_shaper_var_u8_category(&self) -> u8 {
-        let v: &[u8; 4] = bytemuck::cast_ref(&self.var2);
-        v[2]
-    }
-
-    pub(crate) fn set_ot_shaper_var_u8_category(&mut self, c: u8) {
-        let v: &mut [u8; 4] = bytemuck::cast_mut(&mut self.var2);
-        v[2] = c;
-    }
-
-    pub(crate) fn ot_shaper_var_u8_auxiliary(&self) -> u8 {
-        let v: &[u8; 4] = bytemuck::cast_ref(&self.var2);
-        v[3]
-    }
-
-    pub(crate) fn set_ot_shaper_var_u8_auxiliary(&mut self, c: u8) {
-        let v: &mut [u8; 4] = bytemuck::cast_mut(&mut self.var2);
-        v[3] = c;
-    }
+impl GlyphInfo {
+    declare_buffer_var!(
+        u8,
+        2,
+        2,
+        OT_SHAPER_VAR_U8_CATEGORY_VAR,
+        ot_shaper_var_u8_category,
+        set_ot_shaper_var_u8_category
+    );
+    declare_buffer_var!(
+        u8,
+        2,
+        3,
+        OT_SHAPER_VAR_U8_AUXILIARY_VAR,
+        ot_shaper_var_u8_auxiliary,
+        set_ot_shaper_var_u8_auxiliary
+    );
 }
 
 pub const MAX_COMBINING_MARKS: usize = 32;
@@ -37,8 +36,10 @@ pub const HB_OT_SHAPE_ZERO_WIDTH_MARKS_NONE: u32 = 0;
 pub const HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY: u32 = 1;
 pub const HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_LATE: u32 = 2;
 
-pub type DecomposeFn = fn(&hb_ot_shape_normalize_context_t, char) -> Option<(char, char)>;
-pub type ComposeFn = fn(&hb_ot_shape_normalize_context_t, char, char) -> Option<char>;
+pub type DecomposeFn =
+    fn(&hb_ot_shape_normalize_context_t, Codepoint) -> Option<(Codepoint, Codepoint)>;
+pub type ComposeFn =
+    fn(&hb_ot_shape_normalize_context_t, Codepoint, Codepoint) -> Option<Codepoint>;
 
 pub const DEFAULT_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
     collect_features: None,
@@ -332,6 +333,12 @@ pub fn hb_ot_shape_complex_categorize(
         | script::SUNUWAR
         | script::TODHRI
         | script::TULU_TIGALARI
+
+        // Unicode-17.0 additions
+        | script::BERIA_ERFE
+        | script::SIDETIC
+        | script::TAI_YO
+        | script::TOLONG_SIKI
 
         => {
             // If the designer designed the font for the 'DFLT' script,

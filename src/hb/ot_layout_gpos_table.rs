@@ -1,6 +1,6 @@
 #[cfg(not(feature = "std"))]
 #[allow(unused_imports)]
-use core_maths::CoreFloat;
+use core_maths::CoreFloat as _;
 
 use super::buffer::*;
 use super::hb_font_t;
@@ -17,44 +17,67 @@ pub mod attach_type {
     pub const CURSIVE: u8 = 2;
 }
 
+/// See <https://github.com/harfbuzz/harfbuzz/blob/7d936359a27abb2d7cb14ecc102463bb15c11843/src/OT/Layout/GPOS/GPOS.hh#L75>
 fn propagate_attachment_offsets(
     pos: &mut [GlyphPosition],
     len: usize,
     i: usize,
     direction: Direction,
+    nesting_level: usize,
 ) {
     // Adjusts offsets of attached glyphs (both cursive and mark) to accumulate
     // offset of glyph they are attached to.
     let chain = pos[i].attach_chain();
     let kind = pos[i].attach_type();
-    if chain == 0 {
-        return;
-    }
 
     pos[i].set_attach_chain(0);
 
-    let j = (i as isize + isize::from(chain)) as _;
+    let j = (i as isize + isize::from(chain)) as usize;
     if j >= len {
         return;
     }
 
-    propagate_attachment_offsets(pos, len, j, direction);
+    if nesting_level == 0 {
+        return;
+    }
+
+    if pos[j].attach_chain() != 0 {
+        propagate_attachment_offsets(pos, len, j, direction, nesting_level - 1);
+    }
 
     match kind {
         attach_type::MARK => {
             pos[i].x_offset += pos[j].x_offset;
             pos[i].y_offset += pos[j].y_offset;
 
-            assert!(j < i);
-            if direction.is_forward() {
-                for k in j..i {
-                    pos[i].x_offset -= pos[k].x_advance;
-                    pos[i].y_offset -= pos[k].y_advance;
+            // i is the position of the mark; j is the base.
+            if j < i {
+                // This is the common case: mark follows base.
+                // And currently the only way in OpenType.
+                if direction.is_forward() {
+                    for k in j..i {
+                        pos[i].x_offset -= pos[k].x_advance;
+                        pos[i].y_offset -= pos[k].y_advance;
+                    }
+                } else {
+                    for k in j + 1..i + 1 {
+                        pos[i].x_offset += pos[k].x_advance;
+                        pos[i].y_offset += pos[k].y_advance;
+                    }
                 }
             } else {
-                for k in j + 1..i + 1 {
-                    pos[i].x_offset += pos[k].x_advance;
-                    pos[i].y_offset += pos[k].y_advance;
+                // This can happen with `kerx`: a mark attaching
+                // to a base after it in the logical order.
+                if direction.is_forward() {
+                    for k in i..j {
+                        pos[i].x_offset += pos[k].x_advance;
+                        pos[i].y_offset += pos[k].y_advance;
+                    }
+                } else {
+                    for k in i + 1..j + 1 {
+                        pos[i].x_offset -= pos[k].x_advance;
+                        pos[i].y_offset -= pos[k].y_advance;
+                    }
                 }
             }
         }
@@ -80,16 +103,43 @@ pub mod GPOS {
         }
     }
 
-    pub fn position_finish_advances(_: &hb_font_t, _: &mut hb_buffer_t) {}
+    pub fn position_finish_advances(_: &hb_font_t, _: &mut hb_buffer_t) {
+        //buffer.assert_gsubgpos_vars();
+    }
 
     pub fn position_finish_offsets(_: &hb_font_t, buffer: &mut hb_buffer_t) {
+        buffer.assert_gsubgpos_vars();
+
         let len = buffer.len;
         let direction = buffer.direction;
 
         // Handle attachments
         if buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_GPOS_ATTACHMENT != 0 {
-            for i in 0..len {
-                propagate_attachment_offsets(&mut buffer.pos, len, i, direction);
+            // https://github.com/harfbuzz/harfbuzz/issues/5514
+            if buffer.direction.is_forward() {
+                for i in 0..len {
+                    if buffer.pos[i].attach_chain() != 0 {
+                        propagate_attachment_offsets(
+                            &mut buffer.pos,
+                            len,
+                            i,
+                            direction,
+                            MAX_NESTING_LEVEL,
+                        );
+                    }
+                }
+            } else {
+                for i in (0..len).rev() {
+                    if buffer.pos[i].attach_chain() != 0 {
+                        propagate_attachment_offsets(
+                            &mut buffer.pos,
+                            len,
+                            i,
+                            direction,
+                            MAX_NESTING_LEVEL,
+                        );
+                    }
+                }
             }
         }
     }

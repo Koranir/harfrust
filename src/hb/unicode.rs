@@ -1,8 +1,8 @@
-use core::convert::TryFrom;
-
 use super::ucd_table::ucd::*;
 use crate::hb::algs::*;
 use crate::Script;
+
+pub type Codepoint = u32;
 
 // Space estimates based on:
 // https://unicode.org/charts/PDF/U2000.pdf
@@ -24,38 +24,77 @@ pub mod hb_unicode_funcs_t {
     pub const SPACE_NARROW: u8 = 21;
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum hb_unicode_general_category_t {
-    ClosePunctuation,
-    ConnectorPunctuation,
-    Control,
-    CurrencySymbol,
-    DashPunctuation,
-    DecimalNumber,
-    EnclosingMark,
-    FinalPunctuation,
-    Format,
-    InitialPunctuation,
-    LetterNumber,
-    LineSeparator,
-    LowercaseLetter,
-    MathSymbol,
-    ModifierLetter,
-    ModifierSymbol,
-    NonspacingMark,
-    OpenPunctuation,
-    OtherLetter,
-    OtherNumber,
-    OtherPunctuation,
-    OtherSymbol,
-    ParagraphSeparator,
-    PrivateUse,
-    SpaceSeparator,
-    SpacingMark,
-    Surrogate,
-    TitlecaseLetter,
-    Unassigned,
-    UppercaseLetter,
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+pub struct GeneralCategory(pub u8);
+
+#[allow(unused)]
+impl GeneralCategory {
+    pub const CONTROL: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONTROL as _);
+    pub const FORMAT: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_FORMAT as _);
+    pub const UNASSIGNED: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_UNASSIGNED as _);
+    pub const PRIVATE_USE: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_PRIVATE_USE as _);
+    pub const SURROGATE: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_SURROGATE as _);
+    pub const LOWERCASE_LETTER: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_LOWERCASE_LETTER as _);
+    pub const MODIFIER_LETTER: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_LETTER as _);
+    pub const OTHER_LETTER: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_LETTER as _);
+    pub const TITLECASE_LETTER: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_TITLECASE_LETTER as _);
+    pub const UPPERCASE_LETTER: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_UPPERCASE_LETTER as _);
+    pub const SPACING_MARK: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK as _);
+    pub const ENCLOSING_MARK: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK as _);
+    pub const NON_SPACING_MARK: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK as _);
+    pub const DECIMAL_NUMBER: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_DECIMAL_NUMBER as _);
+    pub const LETTER_NUMBER: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_LETTER_NUMBER as _);
+    pub const OTHER_NUMBER: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_NUMBER as _);
+    pub const CONNECT_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONNECT_PUNCTUATION as _);
+    pub const DASH_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_DASH_PUNCTUATION as _);
+    pub const CLOSE_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_CLOSE_PUNCTUATION as _);
+    pub const FINAL_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_FINAL_PUNCTUATION as _);
+    pub const INITIAL_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_INITIAL_PUNCTUATION as _);
+    pub const OTHER_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_PUNCTUATION as _);
+    pub const OPEN_PUNCTUATION: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_OPEN_PUNCTUATION as _);
+    pub const CURRENCY_SYMBOL: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_CURRENCY_SYMBOL as _);
+    pub const MODIFIER_SYMBOL: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_SYMBOL as _);
+    pub const MATH_SYMBOL: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_MATH_SYMBOL as _);
+    pub const OTHER_SYMBOL: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_SYMBOL as _);
+    pub const LINE_SEPARATOR: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_LINE_SEPARATOR as _);
+    pub const PARAGRAPH_SEPARATOR: Self =
+        Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_PARAGRAPH_SEPARATOR as _);
+    pub const SPACE_SEPARATOR: Self = Self(hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACE_SEPARATOR as _);
+}
+
+impl GeneralCategory {
+    pub fn to_u8(self) -> u8 {
+        self.0
+    }
+
+    pub fn is_mark(&self) -> bool {
+        matches!(
+            *self,
+            Self::SPACING_MARK | Self::ENCLOSING_MARK | Self::NON_SPACING_MARK
+        )
+    }
+
+    pub fn is_letter(&self) -> bool {
+        matches!(
+            *self,
+            Self::LOWERCASE_LETTER
+                | Self::MODIFIER_LETTER
+                | Self::OTHER_LETTER
+                | Self::TITLECASE_LETTER
+                | Self::UPPERCASE_LETTER
+        )
+    }
 }
 
 #[allow(dead_code)]
@@ -217,7 +256,7 @@ pub mod modified_combining_class {
 }
 
 #[rustfmt::skip]
-const MODIFIED_COMBINING_CLASS: &[u8; 256] = &[
+static MODIFIED_COMBINING_CLASS: &[u8; 256] = &[
     combining_class::NotReordered,
     combining_class::Overlay,
     2, 3, 4, 5, 6,
@@ -327,123 +366,26 @@ const MODIFIED_COMBINING_CLASS: &[u8; 256] = &[
     combining_class::Invalid,
 ];
 
-pub trait GeneralCategoryExt {
-    fn to_u32(&self) -> u32;
-    fn from_u32(gc: u32) -> Self;
-    fn is_mark(&self) -> bool;
-    fn is_letter(&self) -> bool;
-}
-
-#[rustfmt::skip]
-impl GeneralCategoryExt for hb_unicode_general_category_t {
-    fn to_u32(&self) -> u32 {
-        match *self {
-            hb_unicode_general_category_t::ClosePunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_CLOSE_PUNCTUATION,
-            hb_unicode_general_category_t::ConnectorPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONNECT_PUNCTUATION,
-            hb_unicode_general_category_t::Control => hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONTROL,
-            hb_unicode_general_category_t::CurrencySymbol => hb_gc::HB_UNICODE_GENERAL_CATEGORY_CURRENCY_SYMBOL,
-            hb_unicode_general_category_t::DashPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_DASH_PUNCTUATION,
-            hb_unicode_general_category_t::DecimalNumber => hb_gc::HB_UNICODE_GENERAL_CATEGORY_DECIMAL_NUMBER,
-            hb_unicode_general_category_t::EnclosingMark => hb_gc::HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK,
-            hb_unicode_general_category_t::FinalPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_FINAL_PUNCTUATION,
-            hb_unicode_general_category_t::Format => hb_gc::HB_UNICODE_GENERAL_CATEGORY_FORMAT,
-            hb_unicode_general_category_t::InitialPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_INITIAL_PUNCTUATION,
-            hb_unicode_general_category_t::LetterNumber => hb_gc::HB_UNICODE_GENERAL_CATEGORY_LETTER_NUMBER,
-            hb_unicode_general_category_t::LineSeparator => hb_gc::HB_UNICODE_GENERAL_CATEGORY_LINE_SEPARATOR,
-            hb_unicode_general_category_t::LowercaseLetter => hb_gc::HB_UNICODE_GENERAL_CATEGORY_LOWERCASE_LETTER,
-            hb_unicode_general_category_t::MathSymbol => hb_gc::HB_UNICODE_GENERAL_CATEGORY_MATH_SYMBOL,
-            hb_unicode_general_category_t::ModifierLetter => hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_LETTER,
-            hb_unicode_general_category_t::ModifierSymbol => hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_SYMBOL,
-            hb_unicode_general_category_t::NonspacingMark => hb_gc::HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK,
-            hb_unicode_general_category_t::OpenPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_OPEN_PUNCTUATION,
-            hb_unicode_general_category_t::OtherLetter => hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_LETTER,
-            hb_unicode_general_category_t::OtherNumber => hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_NUMBER,
-            hb_unicode_general_category_t::OtherPunctuation => hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_PUNCTUATION,
-            hb_unicode_general_category_t::OtherSymbol => hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_SYMBOL,
-            hb_unicode_general_category_t::ParagraphSeparator => hb_gc::HB_UNICODE_GENERAL_CATEGORY_PARAGRAPH_SEPARATOR,
-            hb_unicode_general_category_t::PrivateUse => hb_gc::HB_UNICODE_GENERAL_CATEGORY_PRIVATE_USE,
-            hb_unicode_general_category_t::SpaceSeparator => hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACE_SEPARATOR,
-            hb_unicode_general_category_t::SpacingMark => hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK,
-            hb_unicode_general_category_t::Surrogate => hb_gc::HB_UNICODE_GENERAL_CATEGORY_SURROGATE,
-            hb_unicode_general_category_t::TitlecaseLetter => hb_gc::HB_UNICODE_GENERAL_CATEGORY_TITLECASE_LETTER,
-            hb_unicode_general_category_t::Unassigned => hb_gc::HB_UNICODE_GENERAL_CATEGORY_UNASSIGNED,
-            hb_unicode_general_category_t::UppercaseLetter => hb_gc::HB_UNICODE_GENERAL_CATEGORY_UPPERCASE_LETTER
-        }
-    }
-
-    fn from_u32(gc: u32) -> Self {
-        match gc {
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_CLOSE_PUNCTUATION => hb_unicode_general_category_t::ClosePunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONNECT_PUNCTUATION => hb_unicode_general_category_t::ConnectorPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_CONTROL => hb_unicode_general_category_t::Control,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_CURRENCY_SYMBOL => hb_unicode_general_category_t::CurrencySymbol,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_DASH_PUNCTUATION => hb_unicode_general_category_t::DashPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_DECIMAL_NUMBER => hb_unicode_general_category_t::DecimalNumber,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK => hb_unicode_general_category_t::EnclosingMark,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_FINAL_PUNCTUATION => hb_unicode_general_category_t::FinalPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_FORMAT => hb_unicode_general_category_t::Format,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_INITIAL_PUNCTUATION => hb_unicode_general_category_t::InitialPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_LETTER_NUMBER => hb_unicode_general_category_t::LetterNumber,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_LINE_SEPARATOR => hb_unicode_general_category_t::LineSeparator,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_LOWERCASE_LETTER => hb_unicode_general_category_t::LowercaseLetter,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_MATH_SYMBOL => hb_unicode_general_category_t::MathSymbol,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_LETTER => hb_unicode_general_category_t::ModifierLetter,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_SYMBOL => hb_unicode_general_category_t::ModifierSymbol,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK => hb_unicode_general_category_t::NonspacingMark,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_OPEN_PUNCTUATION => hb_unicode_general_category_t::OpenPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_LETTER => hb_unicode_general_category_t::OtherLetter,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_NUMBER => hb_unicode_general_category_t::OtherNumber,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_PUNCTUATION => hb_unicode_general_category_t::OtherPunctuation,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_OTHER_SYMBOL => hb_unicode_general_category_t::OtherSymbol,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_PARAGRAPH_SEPARATOR => hb_unicode_general_category_t::ParagraphSeparator,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_PRIVATE_USE => hb_unicode_general_category_t::PrivateUse,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACE_SEPARATOR => hb_unicode_general_category_t::SpaceSeparator,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_SPACING_MARK => hb_unicode_general_category_t::SpacingMark,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_SURROGATE => hb_unicode_general_category_t::Surrogate,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_TITLECASE_LETTER => hb_unicode_general_category_t::TitlecaseLetter,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_UNASSIGNED => hb_unicode_general_category_t::Unassigned,
-            hb_gc::HB_UNICODE_GENERAL_CATEGORY_UPPERCASE_LETTER => hb_unicode_general_category_t::UppercaseLetter,
-            _ => unreachable!()
-        }
-    }
-
-    fn is_mark(&self) -> bool {
-        matches!(*self, 
-            hb_unicode_general_category_t::SpacingMark |
-            hb_unicode_general_category_t::EnclosingMark |
-            hb_unicode_general_category_t::NonspacingMark)
-    }
-
-    fn is_letter(&self) -> bool {
-        matches!(*self, 
-            hb_unicode_general_category_t::LowercaseLetter |
-            hb_unicode_general_category_t::ModifierLetter |
-            hb_unicode_general_category_t::OtherLetter |
-            hb_unicode_general_category_t::TitlecaseLetter |
-            hb_unicode_general_category_t::UppercaseLetter)
-    }
-}
-
 pub trait CharExt {
     fn script(self) -> Script;
-    fn general_category(self) -> hb_unicode_general_category_t;
+    fn general_category(self) -> GeneralCategory;
     fn space_fallback(self) -> hb_unicode_funcs_t::space_t;
     fn combining_class(self) -> u8;
     fn modified_combining_class(self) -> u8;
-    fn mirrored(self) -> Option<char>;
+    fn mirrored(self) -> Option<Codepoint>;
     fn is_emoji_extended_pictographic(self) -> bool;
     fn is_default_ignorable(self) -> bool;
     fn is_variation_selector(self) -> bool;
-    fn vertical(self) -> Option<char>;
+    fn vertical(self) -> Option<Codepoint>;
 }
 
-impl CharExt for char {
+impl CharExt for Codepoint {
     fn script(self) -> Script {
         _hb_ucd_sc_map[_hb_ucd_sc(self as usize) as usize]
     }
 
-    fn general_category(self) -> hb_unicode_general_category_t {
-        hb_unicode_general_category_t::from_u32(_hb_ucd_gc(self as usize) as u32)
+    fn general_category(self) -> GeneralCategory {
+        GeneralCategory(_hb_ucd_gc(self as usize))
     }
 
     fn space_fallback(self) -> hb_unicode_funcs_t::space_t {
@@ -451,23 +393,23 @@ impl CharExt for char {
 
         // All GC=Zs chars that can use a fallback.
         match self {
-            '\u{0020}' => SPACE,             // SPACE
-            '\u{00A0}' => SPACE,             // NO-BREAK SPACE
-            '\u{2000}' => SPACE_EM_2,        // EN QUAD
-            '\u{2001}' => SPACE_EM,          // EM QUAD
-            '\u{2002}' => SPACE_EM_2,        // EN SPACE
-            '\u{2003}' => SPACE_EM,          // EM SPACE
-            '\u{2004}' => SPACE_EM_3,        // THREE-PER-EM SPACE
-            '\u{2005}' => SPACE_EM_4,        // FOUR-PER-EM SPACE
-            '\u{2006}' => SPACE_EM_6,        // SIX-PER-EM SPACE
-            '\u{2007}' => SPACE_FIGURE,      // FIGURE SPACE
-            '\u{2008}' => SPACE_PUNCTUATION, // PUNCTUATION SPACE
-            '\u{2009}' => SPACE_EM_5,        // THIN SPACE
-            '\u{200A}' => SPACE_EM_16,       // HAIR SPACE
-            '\u{202F}' => SPACE_NARROW,      // NARROW NO-BREAK SPACE
-            '\u{205F}' => SPACE_4_EM_18,     // MEDIUM MATHEMATICAL SPACE
-            '\u{3000}' => SPACE_EM,          // IDEOGRAPHIC SPACE
-            _ => NOT_SPACE,                  // OGHAM SPACE MARK
+            0x0020 => SPACE,             // SPACE
+            0x00A0 => SPACE,             // NO-BREAK SPACE
+            0x2000 => SPACE_EM_2,        // EN QUAD
+            0x2001 => SPACE_EM,          // EM QUAD
+            0x2002 => SPACE_EM_2,        // EN SPACE
+            0x2003 => SPACE_EM,          // EM SPACE
+            0x2004 => SPACE_EM_3,        // THREE-PER-EM SPACE
+            0x2005 => SPACE_EM_4,        // FOUR-PER-EM SPACE
+            0x2006 => SPACE_EM_6,        // SIX-PER-EM SPACE
+            0x2007 => SPACE_FIGURE,      // FIGURE SPACE
+            0x2008 => SPACE_PUNCTUATION, // PUNCTUATION SPACE
+            0x2009 => SPACE_EM_5,        // THIN SPACE
+            0x200A => SPACE_EM_16,       // HAIR SPACE
+            0x202F => SPACE_NARROW,      // NARROW NO-BREAK SPACE
+            0x205F => SPACE_4_EM_18,     // MEDIUM MATHEMATICAL SPACE
+            0x3000 => SPACE_EM,          // IDEOGRAPHIC SPACE
+            _ => NOT_SPACE,              // OGHAM SPACE MARK
         }
     }
 
@@ -479,17 +421,17 @@ impl CharExt for char {
         let u = self;
 
         // Reorder SAKOT to ensure it comes after any tone marks.
-        if u == '\u{1A60}' {
+        if u == 0x1A60 {
             return 254;
         }
 
         // Reorder PADMA to ensure it comes after any vowel marks.
-        if u == '\u{0FC6}' {
+        if u == 0x0FC6 {
             return 254;
         }
 
         // Reorder TSA -PHRU to reorder before U+0F74
-        if u == '\u{0F39}' {
+        if u == 0x0F39 {
             return 127;
         }
 
@@ -498,18 +440,18 @@ impl CharExt for char {
         MODIFIED_COMBINING_CLASS[k as usize]
     }
 
-    fn mirrored(self) -> Option<char> {
+    fn mirrored(self) -> Option<Codepoint> {
         let delta = _hb_ucd_bmg(self as usize);
         if delta == 0 {
             None
         } else {
-            char::from_u32(((self as i32).wrapping_add(delta as i32)) as u32)
+            Some(((self as i32).wrapping_add(delta as i32)) as u32)
         }
     }
 
     fn is_emoji_extended_pictographic(self) -> bool {
         // Generated by scripts/gen-unicode-is-emoji-ext-pict.py
-        match self as u32 {
+        match self {
             0x00A9 => true,
             0x00AE => true,
             0x203C => true,
@@ -520,7 +462,6 @@ impl CharExt for char {
             0x21A9..=0x21AA => true,
             0x231A..=0x231B => true,
             0x2328 => true,
-            0x2388 => true,
             0x23CF => true,
             0x23E9..=0x23F3 => true,
             0x23F8..=0x23FA => true,
@@ -529,11 +470,49 @@ impl CharExt for char {
             0x25B6 => true,
             0x25C0 => true,
             0x25FB..=0x25FE => true,
-            0x2600..=0x2605 => true,
-            0x2607..=0x2612 => true,
-            0x2614..=0x2685 => true,
-            0x2690..=0x2705 => true,
-            0x2708..=0x2712 => true,
+            0x2600..=0x2604 => true,
+            0x260E => true,
+            0x2611 => true,
+            0x2614..=0x2615 => true,
+            0x2618 => true,
+            0x261D => true,
+            0x2620 => true,
+            0x2622..=0x2623 => true,
+            0x2626 => true,
+            0x262A => true,
+            0x262E..=0x262F => true,
+            0x2638..=0x263A => true,
+            0x2640 => true,
+            0x2642 => true,
+            0x2648..=0x2653 => true,
+            0x265F..=0x2660 => true,
+            0x2663 => true,
+            0x2665..=0x2666 => true,
+            0x2668 => true,
+            0x267B => true,
+            0x267E..=0x267F => true,
+            0x2692..=0x2697 => true,
+            0x2699 => true,
+            0x269B..=0x269C => true,
+            0x26A0..=0x26A1 => true,
+            0x26A7 => true,
+            0x26AA..=0x26AB => true,
+            0x26B0..=0x26B1 => true,
+            0x26BD..=0x26BE => true,
+            0x26C4..=0x26C5 => true,
+            0x26C8 => true,
+            0x26CE..=0x26CF => true,
+            0x26D1 => true,
+            0x26D3..=0x26D4 => true,
+            0x26E9..=0x26EA => true,
+            0x26F0..=0x26F5 => true,
+            0x26F7..=0x26FA => true,
+            0x26FD => true,
+            0x2702 => true,
+            0x2705 => true,
+            0x2708..=0x270D => true,
+            0x270F => true,
+            0x2712 => true,
             0x2714 => true,
             0x2716 => true,
             0x271D => true,
@@ -546,7 +525,7 @@ impl CharExt for char {
             0x274E => true,
             0x2753..=0x2755 => true,
             0x2757 => true,
-            0x2763..=0x2767 => true,
+            0x2763..=0x2764 => true,
             0x2795..=0x2797 => true,
             0x27A1 => true,
             0x27B0 => true,
@@ -560,33 +539,74 @@ impl CharExt for char {
             0x303D => true,
             0x3297 => true,
             0x3299 => true,
-            0x1F000..=0x1F0FF => true,
-            0x1F10D..=0x1F10F => true,
-            0x1F12F => true,
-            0x1F16C..=0x1F171 => true,
+            0x1F004 => true,
+            0x1F02C..=0x1F02F => true,
+            0x1F094..=0x1F09F => true,
+            0x1F0AF..=0x1F0B0 => true,
+            0x1F0C0 => true,
+            0x1F0CF..=0x1F0D0 => true,
+            0x1F0F6..=0x1F0FF => true,
+            0x1F170..=0x1F171 => true,
             0x1F17E..=0x1F17F => true,
             0x1F18E => true,
             0x1F191..=0x1F19A => true,
-            0x1F1AD..=0x1F1E5 => true,
+            0x1F1AE..=0x1F1E5 => true,
             0x1F201..=0x1F20F => true,
             0x1F21A => true,
             0x1F22F => true,
             0x1F232..=0x1F23A => true,
             0x1F23C..=0x1F23F => true,
-            0x1F249..=0x1F3FA => true,
-            0x1F400..=0x1F53D => true,
-            0x1F546..=0x1F64F => true,
-            0x1F680..=0x1F6FF => true,
-            0x1F774..=0x1F77F => true,
-            0x1F7D5..=0x1F7FF => true,
+            0x1F249..=0x1F25F => true,
+            0x1F266..=0x1F321 => true,
+            0x1F324..=0x1F393 => true,
+            0x1F396..=0x1F397 => true,
+            0x1F399..=0x1F39B => true,
+            0x1F39E..=0x1F3F0 => true,
+            0x1F3F3..=0x1F3F5 => true,
+            0x1F3F7..=0x1F3FA => true,
+            0x1F400..=0x1F4FD => true,
+            0x1F4FF..=0x1F53D => true,
+            0x1F549..=0x1F54E => true,
+            0x1F550..=0x1F567 => true,
+            0x1F56F..=0x1F570 => true,
+            0x1F573..=0x1F57A => true,
+            0x1F587 => true,
+            0x1F58A..=0x1F58D => true,
+            0x1F590 => true,
+            0x1F595..=0x1F596 => true,
+            0x1F5A4..=0x1F5A5 => true,
+            0x1F5A8 => true,
+            0x1F5B1..=0x1F5B2 => true,
+            0x1F5BC => true,
+            0x1F5C2..=0x1F5C4 => true,
+            0x1F5D1..=0x1F5D3 => true,
+            0x1F5DC..=0x1F5DE => true,
+            0x1F5E1 => true,
+            0x1F5E3 => true,
+            0x1F5E8 => true,
+            0x1F5EF => true,
+            0x1F5F3 => true,
+            0x1F5FA..=0x1F64F => true,
+            0x1F680..=0x1F6C5 => true,
+            0x1F6CB..=0x1F6D2 => true,
+            0x1F6D5..=0x1F6E5 => true,
+            0x1F6E9 => true,
+            0x1F6EB..=0x1F6F0 => true,
+            0x1F6F3..=0x1F6FF => true,
+            0x1F7DA..=0x1F7FF => true,
             0x1F80C..=0x1F80F => true,
             0x1F848..=0x1F84F => true,
             0x1F85A..=0x1F85F => true,
             0x1F888..=0x1F88F => true,
-            0x1F8AE..=0x1F8FF => true,
+            0x1F8AE..=0x1F8AF => true,
+            0x1F8BC..=0x1F8BF => true,
+            0x1F8C2..=0x1F8CF => true,
+            0x1F8D9..=0x1F8FF => true,
             0x1F90C..=0x1F93A => true,
             0x1F93C..=0x1F945 => true,
-            0x1F947..=0x1FAFF => true,
+            0x1F947..=0x1F9FF => true,
+            0x1FA58..=0x1FA5F => true,
+            0x1FA6E..=0x1FAFF => true,
             0x1FC00..=0x1FFFD => true,
             _ => false,
         }
@@ -630,7 +650,7 @@ impl CharExt for char {
     /// E0100..E01EF  # Mn [240] VARIATION SELECTOR-17..VARIATION SELECTOR-256
     /// E01F0..E0FFF  # Cn [3600] <reserved-E01F0>..<reserved-E0FFF>
     fn is_default_ignorable(self) -> bool {
-        let ch = u32::from(self);
+        let ch = self;
         let plane = ch >> 16;
         if plane == 0 {
             // BMP
@@ -663,56 +683,55 @@ impl CharExt for char {
     fn is_variation_selector(self) -> bool {
         // U+180B..180D, U+180F MONGOLIAN FREE VARIATION SELECTORs are handled in the
         //Arabic shaper. No need to match them here.
-        let ch = u32::from(self);
-        (0x0FE00..=0x0FE0F).contains(&ch) || // VARIATION SELECTOR - 1..16
-        (0xE0100..=0xE01EF).contains(&ch) // VARIATION SELECTOR - 17..256
+        (0x0FE00..=0x0FE0F).contains(&self) || // VARIATION SELECTOR - 1..16
+        (0xE0100..=0xE01EF).contains(&self) // VARIATION SELECTOR - 17..256
     }
 
-    fn vertical(self) -> Option<char> {
-        Some(match u32::from(self) >> 8 {
+    fn vertical(self) -> Option<Codepoint> {
+        Some(match self >> 8 {
             0x20 => match self {
-                '\u{2013}' => '\u{fe32}', // EN DASH
-                '\u{2014}' => '\u{fe31}', // EM DASH
-                '\u{2025}' => '\u{fe30}', // TWO DOT LEADER
-                '\u{2026}' => '\u{fe19}', // HORIZONTAL ELLIPSIS
+                0x2013 => 0xfe32, // EN DASH
+                0x2014 => 0xfe31, // EM DASH
+                0x2025 => 0xfe30, // TWO DOT LEADER
+                0x2026 => 0xfe19, // HORIZONTAL ELLIPSIS
                 _ => return None,
             },
             0x30 => match self {
-                '\u{3001}' => '\u{fe11}', // IDEOGRAPHIC COMMA
-                '\u{3002}' => '\u{fe12}', // IDEOGRAPHIC FULL STOP
-                '\u{3008}' => '\u{fe3f}', // LEFT ANGLE BRACKET
-                '\u{3009}' => '\u{fe40}', // RIGHT ANGLE BRACKET
-                '\u{300a}' => '\u{fe3d}', // LEFT DOUBLE ANGLE BRACKET
-                '\u{300b}' => '\u{fe3e}', // RIGHT DOUBLE ANGLE BRACKET
-                '\u{300c}' => '\u{fe41}', // LEFT CORNER BRACKET
-                '\u{300d}' => '\u{fe42}', // RIGHT CORNER BRACKET
-                '\u{300e}' => '\u{fe43}', // LEFT WHITE CORNER BRACKET
-                '\u{300f}' => '\u{fe44}', // RIGHT WHITE CORNER BRACKET
-                '\u{3010}' => '\u{fe3b}', // LEFT BLACK LENTICULAR BRACKET
-                '\u{3011}' => '\u{fe3c}', // RIGHT BLACK LENTICULAR BRACKET
-                '\u{3014}' => '\u{fe39}', // LEFT TORTOISE SHELL BRACKET
-                '\u{3015}' => '\u{fe3a}', // RIGHT TORTOISE SHELL BRACKET
-                '\u{3016}' => '\u{fe17}', // LEFT WHITE LENTICULAR BRACKET
-                '\u{3017}' => '\u{fe18}', // RIGHT WHITE LENTICULAR BRACKET
+                0x3001 => 0xfe11, // IDEOGRAPHIC COMMA
+                0x3002 => 0xfe12, // IDEOGRAPHIC FULL STOP
+                0x3008 => 0xfe3f, // LEFT ANGLE BRACKET
+                0x3009 => 0xfe40, // RIGHT ANGLE BRACKET
+                0x300a => 0xfe3d, // LEFT DOUBLE ANGLE BRACKET
+                0x300b => 0xfe3e, // RIGHT DOUBLE ANGLE BRACKET
+                0x300c => 0xfe41, // LEFT CORNER BRACKET
+                0x300d => 0xfe42, // RIGHT CORNER BRACKET
+                0x300e => 0xfe43, // LEFT WHITE CORNER BRACKET
+                0x300f => 0xfe44, // RIGHT WHITE CORNER BRACKET
+                0x3010 => 0xfe3b, // LEFT BLACK LENTICULAR BRACKET
+                0x3011 => 0xfe3c, // RIGHT BLACK LENTICULAR BRACKET
+                0x3014 => 0xfe39, // LEFT TORTOISE SHELL BRACKET
+                0x3015 => 0xfe3a, // RIGHT TORTOISE SHELL BRACKET
+                0x3016 => 0xfe17, // LEFT WHITE LENTICULAR BRACKET
+                0x3017 => 0xfe18, // RIGHT WHITE LENTICULAR BRACKET
                 _ => return None,
             },
             0xfe => match self {
-                '\u{fe4f}' => '\u{fe34}', // WAVY LOW LINE
+                0xfe4f => 0xfe34, // WAVY LOW LINE
                 _ => return None,
             },
             0xff => match self {
-                '\u{ff01}' => '\u{fe15}', // FULLWIDTH EXCLAMATION MARK
-                '\u{ff08}' => '\u{fe35}', // FULLWIDTH LEFT PARENTHESIS
-                '\u{ff09}' => '\u{fe36}', // FULLWIDTH RIGHT PARENTHESIS
-                '\u{ff0c}' => '\u{fe10}', // FULLWIDTH COMMA
-                '\u{ff1a}' => '\u{fe13}', // FULLWIDTH COLON
-                '\u{ff1b}' => '\u{fe14}', // FULLWIDTH SEMICOLON
-                '\u{ff1f}' => '\u{fe16}', // FULLWIDTH QUESTION MARK
-                '\u{ff3b}' => '\u{fe47}', // FULLWIDTH LEFT SQUARE BRACKET
-                '\u{ff3d}' => '\u{fe48}', // FULLWIDTH RIGHT SQUARE BRACKET
-                '\u{ff3f}' => '\u{fe33}', // FULLWIDTH LOW LINE
-                '\u{ff5b}' => '\u{fe37}', // FULLWIDTH LEFT CURLY BRACKET
-                '\u{ff5d}' => '\u{fe38}', // FULLWIDTH RIGHT CURLY BRACKET
+                0xff01 => 0xfe15, // FULLWIDTH EXCLAMATION MARK
+                0xff08 => 0xfe35, // FULLWIDTH LEFT PARENTHESIS
+                0xff09 => 0xfe36, // FULLWIDTH RIGHT PARENTHESIS
+                0xff0c => 0xfe10, // FULLWIDTH COMMA
+                0xff1a => 0xfe13, // FULLWIDTH COLON
+                0xff1b => 0xfe14, // FULLWIDTH SEMICOLON
+                0xff1f => 0xfe16, // FULLWIDTH QUESTION MARK
+                0xff3b => 0xfe47, // FULLWIDTH LEFT SQUARE BRACKET
+                0xff3d => 0xfe48, // FULLWIDTH RIGHT SQUARE BRACKET
+                0xff3f => 0xfe33, // FULLWIDTH LOW LINE
+                0xff5b => 0xfe37, // FULLWIDTH LEFT CURLY BRACKET
+                0xff5d => 0xfe38, // FULLWIDTH RIGHT CURLY BRACKET
                 _ => return None,
             },
             _ => return None,
@@ -730,24 +749,22 @@ const T_COUNT: u32 = 28;
 const N_COUNT: u32 = V_COUNT * T_COUNT;
 const S_COUNT: u32 = L_COUNT * N_COUNT;
 
-pub fn compose(a: char, b: char) -> Option<char> {
+pub fn compose(a: Codepoint, b: Codepoint) -> Option<Codepoint> {
     // Hangul is handled algorithmically.
     if let Some(ab) = compose_hangul(a, b) {
         return Some(ab);
     }
 
-    let a = a as u32;
-    let b = b as u32;
     let u: u32;
 
-    if (a & 0xFFFFF800) == 0x0000 && (b & 0xFFFFFF80) == 0x0300 {
+    if (a & 0xFFFF_F800) == 0x0000 && (b & 0xFFFF_FF80) == 0x0300 {
         /* If "a" is small enough and "b" is in the U+0300 range,
          * the composition data is encoded in a 32bit array sorted
          * by "a,b" pair. */
         let k = HB_CODEPOINT_ENCODE3_11_7_14(a, b, 0);
         let v = _hb_ucd_dm2_u32_map
             .binary_search_by(|probe| {
-                let key = probe & HB_CODEPOINT_ENCODE3_11_7_14(0x1FFFFF, 0x1FFFFF, 0);
+                let key = probe & HB_CODEPOINT_ENCODE3_11_7_14(0x001F_FFFF, 0x001F_FFFF, 0);
                 key.cmp(&k)
             })
             .ok()
@@ -764,7 +781,7 @@ pub fn compose(a: char, b: char) -> Option<char> {
         let k = HB_CODEPOINT_ENCODE3(a, b, 0);
         let v = _hb_ucd_dm2_u64_map
             .binary_search_by(|probe| {
-                let key = probe & HB_CODEPOINT_ENCODE3(0x1FFFFF, 0x1FFFFF, 0);
+                let key = probe & HB_CODEPOINT_ENCODE3(0x001F_FFFF, 0x001F_FFFF, 0);
                 key.cmp(&k)
             })
             .ok()
@@ -780,16 +797,16 @@ pub fn compose(a: char, b: char) -> Option<char> {
     if u == 0 {
         None
     } else {
-        char::from_u32(u)
+        Some(u)
     }
 }
 
-fn compose_hangul(a: char, b: char) -> Option<char> {
-    let l = u32::from(a);
-    let v = u32::from(b);
+fn compose_hangul(a: Codepoint, b: Codepoint) -> Option<Codepoint> {
+    let l = a;
+    let v = b;
     if L_BASE <= l && l < (L_BASE + L_COUNT) && V_BASE <= v && v < (V_BASE + V_COUNT) {
         let r = S_BASE + (l - L_BASE) * N_COUNT + (v - V_BASE) * T_COUNT;
-        Some(char::try_from(r).unwrap())
+        Some(r)
     } else if S_BASE <= l
         && l <= (S_BASE + S_COUNT - T_COUNT)
         && T_BASE <= v
@@ -797,13 +814,13 @@ fn compose_hangul(a: char, b: char) -> Option<char> {
         && (l - S_BASE) % T_COUNT == 0
     {
         let r = l + (v - T_BASE);
-        Some(char::try_from(r).unwrap())
+        Some(r)
     } else {
         None
     }
 }
 
-pub fn decompose(ab: char) -> Option<(char, char)> {
+pub fn decompose(ab: Codepoint) -> Option<(Codepoint, Codepoint)> {
     if let Some((a, b)) = decompose_hangul(ab) {
         return Some((a, b));
     }
@@ -823,7 +840,7 @@ pub fn decompose(ab: char) -> Option<(char, char)> {
             let j = i - _hb_ucd_dm1_p0_map.len();
             0x20000 | _hb_ucd_dm1_p2_map[j] as u32
         };
-        return char::from_u32(a).map(|a_char| (a_char, '\0'));
+        return Some((a, 0));
     }
 
     i -= _hb_ucd_dm1_p0_map.len() + _hb_ucd_dm1_p2_map.len();
@@ -832,10 +849,7 @@ pub fn decompose(ab: char) -> Option<(char, char)> {
         let v = _hb_ucd_dm2_u32_map[i];
         let a = HB_CODEPOINT_DECODE3_11_7_14_1(v);
         let b = HB_CODEPOINT_DECODE3_11_7_14_2(v);
-        return match (char::from_u32(a), char::from_u32(b)) {
-            (Some(a), Some(b)) => Some((a, b)),
-            _ => None,
-        };
+        return Some((a, b));
     }
 
     i -= _hb_ucd_dm2_u32_map.len();
@@ -843,14 +857,11 @@ pub fn decompose(ab: char) -> Option<(char, char)> {
     let v = _hb_ucd_dm2_u64_map[i];
     let a = HB_CODEPOINT_DECODE3_1(v);
     let b = HB_CODEPOINT_DECODE3_2(v);
-    match (char::from_u32(a), char::from_u32(b)) {
-        (Some(a), Some(b)) => Some((a, b)),
-        _ => None,
-    }
+    Some((a, b))
 }
 
-pub fn decompose_hangul(ab: char) -> Option<(char, char)> {
-    let si = u32::from(ab).wrapping_sub(S_BASE);
+pub fn decompose_hangul(ab: Codepoint) -> Option<(Codepoint, Codepoint)> {
+    let si = ab.wrapping_sub(S_BASE);
     if si >= S_COUNT {
         return None;
     }
@@ -862,8 +873,7 @@ pub fn decompose_hangul(ab: char) -> Option<(char, char)> {
         // L,V
         (L_BASE + (si / N_COUNT), V_BASE + (si % N_COUNT) / T_COUNT)
     };
-
-    Some((char::try_from(a).unwrap(), char::try_from(b).unwrap()))
+    Some((a, b))
 }
 
 pub mod hb_gc {

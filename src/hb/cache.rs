@@ -17,7 +17,7 @@ impl AtomicStorage for AtomicU16 {
     }
 
     fn set(&self, val: u32) {
-        self.store(val as u16, Ordering::Relaxed)
+        self.store(val as u16, Ordering::Relaxed);
     }
 
     fn default() -> Self {
@@ -34,7 +34,7 @@ impl AtomicStorage for AtomicU32 {
     }
 
     fn set(&self, val: u32) {
-        self.store(val, Ordering::Relaxed)
+        self.store(val, Ordering::Relaxed);
     }
 
     fn default() -> Self {
@@ -75,6 +75,8 @@ pub struct hb_cache_core_t<
 impl<const KEY_BITS: usize, const VALUE_BITS: usize, const CACHE_SIZE: usize, T: AtomicStorage>
     hb_cache_core_t<KEY_BITS, VALUE_BITS, CACHE_SIZE, T>
 {
+    pub const MAX_VALUE: u32 = (1 << VALUE_BITS) - 1;
+
     pub fn new() -> Self {
         debug_assert!(
             CACHE_SIZE.is_power_of_two(),
@@ -104,7 +106,7 @@ impl<const KEY_BITS: usize, const VALUE_BITS: usize, const CACHE_SIZE: usize, T:
         let tag = stored >> VALUE_BITS;
         let expected_tag = key >> (CACHE_SIZE as u32).ilog2();
 
-        if stored == u32::MAX || tag != expected_tag {
+        if stored == T::default().get() || tag != expected_tag {
             return None;
         }
 
@@ -112,14 +114,17 @@ impl<const KEY_BITS: usize, const VALUE_BITS: usize, const CACHE_SIZE: usize, T:
     }
 
     #[inline]
-    pub fn set(&self, key: u32, value: u32) -> bool {
+    pub fn set(&self, key: u32, value: u32) {
         if (key >> KEY_BITS) != 0 || (value >> VALUE_BITS) != 0 {
-            return false;
+            return;
         }
+        self.set_unchecked(key, value);
+    }
 
+    #[inline]
+    pub fn set_unchecked(&self, key: u32, value: u32) {
         let index = (key as usize) & (CACHE_SIZE - 1);
         let packed = ((key >> (CACHE_SIZE as u32).ilog2()) << VALUE_BITS) | value;
         self.values[index].set(packed);
-        true
     }
 }

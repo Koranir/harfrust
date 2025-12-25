@@ -11,10 +11,12 @@ from sys import platform
 # harfbuzz test files that will be ignored.
 IGNORE_TESTS = [
     "macos.tests", # We disable these here because we handle MacOS tests separately.
-    "coretext.tests",
-    "directwrite.tests",
-    "uniscribe.tests",
-    "arabic-fallback-shaping.tests",
+    "coretext.tests", # Irrelevant
+    "directwrite.tests", # Irrelevant
+    "uniscribe.tests", # Irrelevant
+    "arabic-fallback-shaping.tests", # Not implemented
+    "synthetic.tests", # Not implemented
+    "harfbust.tests", # We behave differently
 ]
 
 # harfbuzz test cases that will be ignored.
@@ -25,40 +27,12 @@ IGNORE_TEST_CASES = [
     "simple_002",
     # `dfont` is not supported.
     "collections_001",
-    "collections_002",
-    "collections_003",
-    # Face index out of bounds. ttf-parser doesn't permit this.
-    "collections_006",
     # Requires support for the ltag table.
     "macos_002",
-    # Custom MacOS test. A shortened version of `macos_013`, but with `--show-flags`.
-    # The shaped output is correct, but a buffer flag is there, even though there shouldn't be.
-    # Wasn't able to figure out the problem, but the problem occurs during kerning. In harfbuzz, it uses the `drive`
-    # method, while in rustybuzz it uses `state_machine_kerning` which seems to apply some different rules for the flags.
-    "macos_122",
-
-    # This custom test fails because harfbuzz uses a set digest in AAT to abort early
-    # which we don't do yet. Is basically the same as morx_20_005, but with `--show-flags`
-    "glyph_flags_002",
-
-    # The glyph extents are shifted 100 units to the right in HarfBuzz due to "undocumented rasterizer behavior"
-    # (see https://github.com/harfbuzz/harfbuzz/blob/462a54895b97cf5a3fd023f4ea5528a9b0e14e0e/src/OT/glyf/Glyph.hh#L520-L528
-    # and https://github.com/harfbuzz/harfbuzz/pull/1999).
-    # ttf-parser currently does not implement this.
-    "colr_011",
-
-    # Requires support in ttf-parser (https://github.com/harfbuzz/ttf-parser/pull/185)
-    "colr_014",
-    "colr_021",
-
-    # We ignore extents for COLRv1 in a "forward looking shaper"
-    # (see https://github.com/harfbuzz/harfrust/pull/4#issuecomment-2252964385)
-    "color_fonts_001",
-    "color_fonts_002",
-    "color_fonts_003",
 
     # https://github.com/harfbuzz/harfrust/pull/52
-    "vertical_016",
+    "vertical_015",
+    "vertical_017",
 ]
 
 
@@ -98,8 +72,10 @@ def prune_test_options(options):
     options = options.replace("--shaper=ot", "")
     options = options.replace(" --font-funcs=ft", "").replace("--font-funcs=ft", "")
     options = options.replace(" --font-funcs=ot", "").replace("--font-funcs=ot", "")
-    # we don't support font scaling
+    # We don't support font scaling
     options = options.replace("--font-size=1000", "")
+    # We don't care about extents
+    options = options.replace("--show-extents", "")
     # We don't support glyphs > u16
     options = options.replace("--not-found-variation-selector-glyph=1000000", "--not-found-variation-selector-glyph=64000")
     options = options.strip()
@@ -158,13 +134,11 @@ def convert_test_file(
 
     if glyphs_expected != "*":
 
-        glyphs_expected = subprocess.run(
-            options_list, check=True, stdout=subprocess.PIPE
-        ).stdout.decode()
-
-        glyphs_expected = glyphs_expected.strip()[
-            1:-1
-        ]  # remove leading and trailing whitespaces and `[..]`
+        glyphs_expected = (
+            subprocess.run(options_list, check=True, stdout=subprocess.PIPE)
+            .stdout.decode()
+            .strip()
+        )
 
     options_rs = options
     options_rs = options_rs.replace('"', '\\"')

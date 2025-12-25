@@ -119,7 +119,7 @@ fn main() {
     let args = match parse_args() {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("Error: {}.", e);
+            eprintln!("Error: {e}.");
             std::process::exit(1);
         }
     };
@@ -130,7 +130,7 @@ fn main() {
     }
 
     if args.help {
-        print!("{}", HELP);
+        print!("{HELP}");
         return;
     }
 
@@ -205,6 +205,8 @@ fn main() {
             buffer.set_not_found_variation_selector_glyph(g);
         }
 
+        buffer.guess_segment_properties();
+
         let glyph_buffer = shaper.shape(buffer, &args.features);
 
         let mut format_flags = harfrust::SerializeFlags::default();
@@ -240,9 +242,9 @@ fn parse_unicodes(s: &str) -> Result<String, String> {
     let mut text = String::new();
     for u in s.split(',') {
         let u = u32::from_str_radix(&u[2..], 16)
-            .map_err(|_| format!("'{}' is not a valid codepoint", u))?;
+            .map_err(|_| format!("'{u}' is not a valid codepoint"))?;
 
-        let c = char::try_from(u).map_err(|_| format!("{} is not a valid codepoint", u))?;
+        let c = char::try_from(u).map_err(|_| format!("{u} is not a valid codepoint"))?;
 
         text.push(c);
     }
@@ -279,7 +281,7 @@ fn parse_cluster(s: &str) -> Result<harfrust::BufferClusterLevel, String> {
 
 fn system_language() -> harfrust::Language {
     unsafe {
-        libc::setlocale(libc::LC_ALL, b"\0" as *const _ as *const i8);
+        libc::setlocale(libc::LC_ALL, c"".as_ptr());
         let s = libc::setlocale(libc::LC_CTYPE, std::ptr::null());
         let s = std::ffi::CStr::from_ptr(s);
         let s = s.to_str().expect("locale must be ASCII");

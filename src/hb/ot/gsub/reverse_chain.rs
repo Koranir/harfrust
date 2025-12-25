@@ -1,10 +1,10 @@
+use crate::hb::buffer::GlyphInfo;
 use crate::hb::ot_layout::MAX_NESTING_LEVEL;
 use crate::hb::ot_layout_gsubgpos::OT::hb_ot_apply_context_t;
 use crate::hb::ot_layout_gsubgpos::{
     match_backtrack, match_lookahead, Apply, WouldApply, WouldApplyContext,
 };
 use read_fonts::tables::gsub::ReverseChainSingleSubstFormat1;
-use read_fonts::types::GlyphId;
 
 impl WouldApply for ReverseChainSingleSubstFormat1<'_> {
     fn would_apply(&self, ctx: &WouldApplyContext) -> bool {
@@ -37,30 +37,30 @@ impl Apply for ReverseChainSingleSubstFormat1<'_> {
         let backtrack_coverages = self.backtrack_coverages();
         let lookahead_coverages = self.lookahead_coverages();
 
-        let f1 = |glyph: GlyphId, index| {
+        let f1 = |info: &mut GlyphInfo, index| {
             backtrack_coverages
                 .get(index as usize)
                 .ok()
-                .and_then(|coverage| coverage.get(glyph))
+                .and_then(|coverage| coverage.get(info.glyph_id))
                 .is_some()
         };
 
-        let f2 = |glyph: GlyphId, index| {
+        let f2 = |info: &mut GlyphInfo, index| {
             lookahead_coverages
                 .get(index as usize)
                 .ok()
-                .and_then(|coverage| coverage.get(glyph))
+                .and_then(|coverage| coverage.get(info.glyph_id))
                 .is_some()
         };
 
         let mut start_index = 0;
         let mut end_index = 0;
 
-        if match_backtrack(ctx, backtrack_coverages.len() as u16, &f1, &mut start_index) {
+        if match_backtrack(ctx, backtrack_coverages.len() as u16, f1, &mut start_index) {
             if match_lookahead(
                 ctx,
                 lookahead_coverages.len() as u16,
-                &f2,
+                f2,
                 ctx.buffer.idx + 1,
                 &mut end_index,
             ) {

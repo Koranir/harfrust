@@ -8,6 +8,9 @@ use super::ot_layout::TableIndex;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::{hb_font_t, hb_mask_t, hb_tag_t, tag, Language, Script};
 
+// TODO: Remove once MSRV is 1.80+
+use core::mem::{size_of, size_of_val};
+
 pub struct hb_ot_map_t {
     found_script: [bool; 2],
     chosen_script: [Option<hb_tag_t>; 2],
@@ -15,6 +18,7 @@ pub struct hb_ot_map_t {
     features: Vec<feature_map_t>,
     lookups: [Vec<lookup_map_t>; 2],
     stages: [Vec<StageMap>; 2],
+    feature_variations: [Option<u32>; 2],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,6 +153,10 @@ impl hb_ot_map_t {
             .map_or(lookups.len(), |curr| curr.last_lookup);
         start..end
     }
+
+    pub fn feature_variations(&self) -> &[Option<u32>; 2] {
+        &self.feature_variations
+    }
 }
 
 pub type hb_ot_map_feature_flags_t = u32;
@@ -195,7 +203,7 @@ struct stage_info_t {
     pause_func: Option<pause_func_t>,
 }
 
-const GLOBAL_BIT_SHIFT: u32 = 8 * core::mem::size_of::<u32>() as u32 - 1;
+const GLOBAL_BIT_SHIFT: u32 = 8 * size_of::<u32>() as u32 - 1;
 const GLOBAL_BIT_MASK: hb_mask_t = 1 << GLOBAL_BIT_SHIFT;
 
 impl<'a> hb_ot_map_builder_t<'a> {
@@ -335,6 +343,7 @@ impl<'a> hb_ot_map_builder_t<'a> {
             features,
             lookups,
             stages,
+            feature_variations: self.face.ot_tables.feature_variations,
         }
     }
 
@@ -357,7 +366,7 @@ impl<'a> hb_ot_map_builder_t<'a> {
             } else {
                 // Limit bits per feature.
                 let v = info.max_value;
-                let num_bits = 8 * core::mem::size_of_val(&v) as u32 - v.leading_zeros();
+                let num_bits = 8 * size_of_val(&v) as u32 - v.leading_zeros();
                 hb_ot_map_t::MAX_BITS.min(num_bits)
             };
 
@@ -483,10 +492,7 @@ impl<'a> hb_ot_map_builder_t<'a> {
             let mut stage_index = 0;
             let mut last_lookup = 0;
 
-            let variation_index = self
-                .face
-                .layout_table(table_index)
-                .and_then(|t| t.feature_variation_index(self.face.ot_tables.coords));
+            let variation_index = self.face.ot_tables.feature_variations[table_index as usize];
 
             for stage in 0..self.current_stage[table_index] {
                 if let Some(feature_index) = required_feature_index[table_index] {

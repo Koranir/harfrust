@@ -1,3 +1,4 @@
+use crate::U32Set;
 use alloc::{string::String, vec::Vec};
 use core::cmp::min;
 use core::convert::TryFrom;
@@ -5,9 +6,10 @@ use read_fonts::types::{GlyphId, GlyphId16};
 
 use super::buffer::glyph_flag::{SAFE_TO_INSERT_TATWEEL, UNSAFE_TO_BREAK, UNSAFE_TO_CONCAT};
 use super::face::hb_glyph_extents_t;
-use super::unicode::{CharExt, GeneralCategoryExt};
+use super::unicode::CharExt;
 use super::{hb_font_t, hb_mask_t};
 use crate::hb::set_digest::hb_set_digest_t;
+use crate::hb::unicode::Codepoint;
 use crate::{script, BufferClusterLevel, BufferFlags, Direction, Language, Script, SerializeFlags};
 
 const CONTEXT_LENGTH: usize = 5;
@@ -28,7 +30,7 @@ pub mod glyph_flag {
     ///
     /// This can be used to optimize paragraph layout,
     /// by avoiding re-shaping of each line after line-breaking.
-    pub const UNSAFE_TO_BREAK: u32 = 0x00000001;
+    pub const UNSAFE_TO_BREAK: u32 = 0x0000_0001;
     /// Indicates that if input text is changed on one side
     /// of the beginning of the cluster this glyph is part
     /// of, then the shaping results for the other side
@@ -89,16 +91,16 @@ pub mod glyph_flag {
     /// To use this flag, you must enable the buffer flag
     /// PRODUCE_UNSAFE_TO_CONCAT during shaping, otherwise
     /// the buffer flag will not be reliably produced.
-    pub const UNSAFE_TO_CONCAT: u32 = 0x00000002;
+    pub const UNSAFE_TO_CONCAT: u32 = 0x0000_0002;
 
     /// In scripts that use elongation (Arabic,
     /// Mongolian, Syriac, etc.), this flag signifies
     /// that it is safe to insert a U+0640 TATWEEL
     /// character *before* this cluster for elongation.
-    pub const SAFE_TO_INSERT_TATWEEL: u32 = 0x00000004;
+    pub const SAFE_TO_INSERT_TATWEEL: u32 = 0x0000_0004;
 
     /// All the currently defined flags.
-    pub const DEFINED: u32 = 0x00000007; // OR of all defined flags
+    pub const DEFINED: u32 = 0x0000_0007; // OR of all defined flags
 }
 
 /// Holds the positions of the glyph in both horizontal and vertical directions.
@@ -153,9 +155,15 @@ impl GlyphPosition {
 }
 
 /// A glyph info.
+///
+/// Structure that holds information about the glyphs and their relation to
+/// input text.
+///
+/// HarfBuzz calls this `hb_glyph_info_t`. See the [documentation](https://harfbuzz.github.io/harfbuzz-hb-buffer.html#hb-glyph-info-t)
+/// and [source](https://github.com/harfbuzz/harfbuzz/blob/368598b5bd9c37a15cb0fd5438b8e617e254609b/src/hb-buffer.h#L62).
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug, bytemuck::Pod, bytemuck::Zeroable)]
-pub struct hb_glyph_info_t {
+pub struct GlyphInfo {
     // NOTE: Stores a Unicode codepoint before shaping and a glyph ID after.
     //       Just like harfbuzz, we are using the same variable for two purposes.
     //       Occupies u32 as a codepoint and u16 as a glyph id.
@@ -168,11 +176,90 @@ pub struct hb_glyph_info_t {
     ///
     /// [Read more on clusters](https://harfbuzz.github.io/clusters.html).
     pub cluster: u32,
-    pub(crate) var1: u32,
-    pub(crate) var2: u32,
+    pub(crate) vars: [u32; 2],
 }
 
-impl hb_glyph_info_t {
+#[allow(dead_code)]
+pub(crate) struct buffer_var_shape {
+    pub(crate) width: u8,
+    pub(crate) var_index: u8,
+    pub(crate) index: u8,
+}
+
+impl buffer_var_shape {
+    #[inline]
+    pub fn start(&self) -> u8 {
+        (self.var_index - 1) * 4 + self.index * self.width
+    }
+
+    #[inline]
+    pub fn count(&self) -> u8 {
+        self.width
+    }
+
+    #[inline]
+    pub fn bits(&self) -> u8 {
+        let start = self.start();
+        let end = start + self.count();
+        debug_assert!(end <= 8);
+        ((1u16 << end) - (1u16 << start)) as u8
+    }
+}
+
+macro_rules! declare_buffer_var {
+    ($ty:ty, $var_index:expr, $index:expr, $var_name:ident, $getter:ident, $setter:ident) => {
+        #[allow(dead_code)]
+        pub(crate) const $var_name: buffer_var_shape = buffer_var_shape {
+            width: core::mem::size_of::<$ty>() as u8,
+            var_index: $var_index,
+            index: $index,
+        };
+
+        #[inline]
+        #[allow(dead_code)]
+        pub(crate) fn $getter(&self) -> $ty {
+            const LEN: usize = core::mem::size_of::<u32>() / core::mem::size_of::<$ty>();
+            let v: &[$ty; LEN] = bytemuck::cast_ref(&self.vars[$var_index - 1usize]);
+            v[$index]
+        }
+
+        #[inline]
+        #[allow(dead_code)]
+        pub(crate) fn $setter(&mut self, value: $ty) {
+            const LEN: usize = core::mem::size_of::<u32>() / core::mem::size_of::<$ty>();
+            let v: &mut [$ty; LEN] = bytemuck::cast_mut(&mut self.vars[$var_index - 1usize]);
+            v[$index] = value;
+        }
+    };
+}
+
+macro_rules! declare_buffer_var_alias {
+    ($alias_var:ident, $ty:ty, $var_name:ident, $getter:ident, $setter:ident) => {
+        #[allow(dead_code)]
+        pub(crate) const $var_name: buffer_var_shape = GlyphInfo::$alias_var;
+
+        #[inline]
+        pub(crate) fn $getter(&self) -> $ty {
+            const { assert!(GlyphInfo::$alias_var.width == core::mem::size_of::<$ty>() as u8) };
+            const LEN: usize = core::mem::size_of::<u32>() / core::mem::size_of::<$ty>();
+            let v: &[$ty; LEN] =
+                bytemuck::cast_ref(&self.vars[GlyphInfo::$alias_var.var_index as usize - 1usize]);
+            v[GlyphInfo::$alias_var.index as usize]
+        }
+
+        #[inline]
+        pub(crate) fn $setter(&mut self, value: $ty) {
+            const { assert!(GlyphInfo::$alias_var.width == core::mem::size_of::<$ty>() as u8) };
+            const LEN: usize = core::mem::size_of::<u32>() / core::mem::size_of::<$ty>();
+            let v: &mut [$ty; LEN] = bytemuck::cast_mut(
+                &mut self.vars[GlyphInfo::$alias_var.var_index as usize - 1usize],
+            );
+            v[GlyphInfo::$alias_var.index as usize] = value;
+        }
+    };
+}
+
+impl GlyphInfo {
     /// Indicates that if input text is broken at the beginning of the cluster this glyph
     /// is part of, then both sides need to be re-shaped, as the result might be different.
     ///
@@ -184,7 +271,7 @@ impl hb_glyph_info_t {
     /// after line-breaking, or limiting the reshaping to a small piece around
     /// the breaking point only.
     pub fn unsafe_to_break(&self) -> bool {
-        self.mask & glyph_flag::UNSAFE_TO_BREAK != 0
+        self.mask & UNSAFE_TO_BREAK != 0
     }
 
     /// Indicates that if input text is changed on one side of the beginning of the cluster
@@ -219,7 +306,7 @@ impl hb_glyph_info_t {
     ///    always imply this flag. To use this flag, you must enable the buffer flag [`BufferFlags::PRODUCE_UNSAFE_TO_CONCAT`]
     ///    during shaping, otherwise the buffer flag will not be reliably produced.
     pub fn unsafe_to_concat(&self) -> bool {
-        self.mask & glyph_flag::UNSAFE_TO_CONCAT != 0
+        self.mask & UNSAFE_TO_CONCAT != 0
     }
 
     /// In scripts that use elongation (Arabic, Mongolian, Syriac, etc.), this flag signifies that it is
@@ -227,12 +314,12 @@ impl hb_glyph_info_t {
     /// determine the script-specific elongation places, but only when it is safe to do the elongation
     /// without interrupting text shaping.
     pub fn safe_to_insert_tatweel(&self) -> bool {
-        self.mask & glyph_flag::SAFE_TO_INSERT_TATWEEL != 0
+        self.mask & SAFE_TO_INSERT_TATWEEL != 0
     }
 
     #[inline]
-    pub(crate) fn as_char(&self) -> char {
-        char::try_from(self.glyph_id).unwrap()
+    pub(crate) fn as_codepoint(&self) -> Codepoint {
+        self.glyph_id
     }
 
     #[inline]
@@ -246,34 +333,17 @@ impl hb_glyph_info_t {
         Some(gid.into())
     }
 
-    // Var allocation: unicode_props
-    // Used during the entire shaping process to store unicode properties
-
-    #[inline]
-    pub(crate) fn unicode_props(&self) -> u16 {
-        let v: &[u16; 2] = bytemuck::cast_ref(&self.var2);
-        v[0]
-    }
-
-    #[inline]
-    pub(crate) fn set_unicode_props(&mut self, n: u16) {
-        let v: &mut [u16; 2] = bytemuck::cast_mut(&mut self.var2);
-        v[0] = n;
-    }
-
     pub(crate) fn init_unicode_props(&mut self, scratch_flags: &mut hb_buffer_scratch_flags_t) {
-        let u = self.as_char();
+        let u = self.as_codepoint();
         let gc = u.general_category();
-        let mut props = gc.to_u32() as u16;
+        let mut props = gc.0 as u16;
 
-        if u as u32 >= 0x80 {
-            *scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_NON_ASCII;
-
+        if u >= 0x80 {
             if u.is_default_ignorable() {
                 props |= UnicodeProps::IGNORABLE.bits();
                 *scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_DEFAULT_IGNORABLES;
 
-                match u as u32 {
+                match u {
                     0x200C => props |= UnicodeProps::CF_ZWNJ.bits(),
                     0x200D => props |= UnicodeProps::CF_ZWJ.bits(),
 
@@ -302,6 +372,7 @@ impl hb_glyph_info_t {
             }
 
             if gc.is_mark() {
+                *scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_CONTINUATIONS;
                 props |= UnicodeProps::CONTINUATION.bits();
                 props |= (u.modified_combining_class() as u16) << 8;
             }
@@ -315,55 +386,6 @@ impl hb_glyph_info_t {
         let mut n = self.unicode_props();
         n &= !UnicodeProps::HIDDEN.bits();
         self.set_unicode_props(n);
-    }
-
-    #[inline]
-    pub(crate) fn lig_props(&self) -> u8 {
-        let v: &[u8; 4] = bytemuck::cast_ref(&self.var1);
-        v[2]
-    }
-
-    #[inline]
-    pub(crate) fn set_lig_props(&mut self, n: u8) {
-        let v: &mut [u8; 4] = bytemuck::cast_mut(&mut self.var1);
-        v[2] = n;
-    }
-
-    #[inline]
-    pub(crate) fn glyph_props(&self) -> u16 {
-        let v: &[u16; 2] = bytemuck::cast_ref(&self.var1);
-        v[0]
-    }
-
-    #[inline]
-    pub(crate) fn set_glyph_props(&mut self, n: u16) {
-        let v: &mut [u16; 2] = bytemuck::cast_mut(&mut self.var1);
-        v[0] = n;
-    }
-
-    #[inline]
-    pub(crate) fn syllable(&self) -> u8 {
-        let v: &[u8; 4] = bytemuck::cast_ref(&self.var1);
-        v[3]
-    }
-
-    #[inline]
-    pub(crate) fn set_syllable(&mut self, n: u8) {
-        let v: &mut [u8; 4] = bytemuck::cast_mut(&mut self.var1);
-        v[3] = n;
-    }
-
-    // Var allocation: glyph_index
-    // Used during the normalization process to store glyph indices
-
-    #[inline]
-    pub(crate) fn glyph_index(&mut self) -> u32 {
-        self.var1
-    }
-
-    #[inline]
-    pub(crate) fn set_glyph_index(&mut self, n: u32) {
-        self.var1 = n;
     }
 }
 
@@ -386,9 +408,6 @@ pub struct hb_buffer_t {
     pub script: Option<Script>,
     pub language: Option<Language>,
 
-    /// Shaping failure
-    pub shaping_failed: bool,
-
     /// Allocations successful.
     pub successful: bool,
     /// Whether we have an output buffer going on.
@@ -401,16 +420,20 @@ pub struct hb_buffer_t {
     pub len: usize,
     pub out_len: usize,
 
-    pub info: Vec<hb_glyph_info_t>,
+    pub info: Vec<GlyphInfo>,
     pub pos: Vec<GlyphPosition>,
 
     // Text before / after the main buffer contents.
     // Always in Unicode, and ordered outward.
     // Index 0 is for "pre-context", 1 for "post-context".
-    pub context: [[char; CONTEXT_LENGTH]; 2],
+    pub context: [[Codepoint; CONTEXT_LENGTH]; 2],
     pub context_len: [usize; 2],
 
+    pub(crate) digest: hb_set_digest_t,
+    pub(crate) glyph_set: U32Set,
+
     // Managed by enter / leave
+    pub allocated_var_bits: u8,
     pub serial: u8,
     pub scratch_flags: hb_buffer_scratch_flags_t,
     /// Maximum allowed len.
@@ -420,15 +443,15 @@ pub struct hb_buffer_t {
 }
 
 impl hb_buffer_t {
-    pub const MAX_LEN_FACTOR: usize = 64;
-    pub const MAX_LEN_MIN: usize = 16384;
+    pub const MAX_LEN_FACTOR: usize = 256;
+    pub const MAX_LEN_MIN: usize = 65536;
     // Shaping more than a billion chars? Let us know!
-    pub const MAX_LEN_DEFAULT: usize = 0x3FFFFFFF;
+    pub const MAX_LEN_DEFAULT: usize = 0x3FFF_FFFF;
 
-    pub const MAX_OPS_FACTOR: i32 = 1024;
-    pub const MAX_OPS_MIN: i32 = 16384;
+    pub const MAX_OPS_FACTOR: i32 = 4096;
+    pub const MAX_OPS_MIN: i32 = 65536;
     // Shaping more than a billion operations? Let us know!
-    pub const MAX_OPS_DEFAULT: i32 = 0x1FFFFFFF;
+    pub const MAX_OPS_DEFAULT: i32 = 0x1FFF_FFFF;
 
     /// Creates a new `Buffer`.
     pub fn new() -> Self {
@@ -443,7 +466,6 @@ impl hb_buffer_t {
             direction: Direction::Invalid,
             script: None,
             language: None,
-            shaping_failed: false,
             successful: true,
             have_output: false,
             have_positions: false,
@@ -453,22 +475,64 @@ impl hb_buffer_t {
             info: Vec::new(),
             pos: Vec::new(),
             have_separate_output: false,
+            allocated_var_bits: 0,
             serial: 0,
-            context: [
-                ['\0', '\0', '\0', '\0', '\0'],
-                ['\0', '\0', '\0', '\0', '\0'],
-            ],
+            context: Default::default(),
             context_len: [0, 0],
+            digest: hb_set_digest_t::new(),
+            glyph_set: U32Set::default(),
         }
     }
 
     #[inline]
-    pub fn info_slice_mut(&mut self) -> &mut [hb_glyph_info_t] {
+    pub fn allocate_var(&mut self, shape: buffer_var_shape) {
+        let bits = shape.bits();
+        debug_assert_eq!(
+            self.allocated_var_bits & bits,
+            0,
+            "Variable already allocated"
+        );
+        self.allocated_var_bits |= bits;
+    }
+
+    #[inline]
+    pub fn try_allocate_var(&mut self, shape: buffer_var_shape) -> bool {
+        let bits = shape.bits();
+        if self.allocated_var_bits & bits != 0 {
+            return false;
+        }
+        self.allocated_var_bits |= bits;
+        true
+    }
+
+    #[inline]
+    pub fn deallocate_var(&mut self, shape: buffer_var_shape) {
+        let bits = shape.bits();
+        debug_assert_eq!(
+            self.allocated_var_bits & bits,
+            bits,
+            "Deallocating unallocated var"
+        );
+        self.allocated_var_bits &= !bits;
+    }
+
+    #[inline]
+    pub fn assert_var(&self, shape: buffer_var_shape) {
+        let bits = shape.bits();
+        debug_assert_eq!(
+            self.allocated_var_bits & bits,
+            bits,
+            "Variable not allocated"
+        );
+    }
+
+    #[inline]
+    pub fn info_slice_mut(&mut self) -> &mut [GlyphInfo] {
         &mut self.info[..self.len]
     }
 
     #[inline]
-    pub fn out_info(&self) -> &[hb_glyph_info_t] {
+    pub fn out_info(&self) -> &[GlyphInfo] {
         if self.have_separate_output {
             bytemuck::cast_slice(self.pos.as_slice())
         } else {
@@ -477,7 +541,7 @@ impl hb_buffer_t {
     }
 
     #[inline]
-    pub fn out_info_mut(&mut self) -> &mut [hb_glyph_info_t] {
+    pub fn out_info_mut(&mut self) -> &mut [GlyphInfo] {
         if self.have_separate_output {
             bytemuck::cast_slice_mut(self.pos.as_mut_slice())
         } else {
@@ -486,17 +550,17 @@ impl hb_buffer_t {
     }
 
     #[inline]
-    fn set_out_info(&mut self, i: usize, info: hb_glyph_info_t) {
+    fn set_out_info(&mut self, i: usize, info: GlyphInfo) {
         self.out_info_mut()[i] = info;
     }
 
     #[inline]
-    pub fn cur(&self, i: usize) -> &hb_glyph_info_t {
+    pub fn cur(&self, i: usize) -> &GlyphInfo {
         &self.info[self.idx + i]
     }
 
     #[inline]
-    pub fn cur_mut(&mut self, i: usize) -> &mut hb_glyph_info_t {
+    pub fn cur_mut(&mut self, i: usize) -> &mut GlyphInfo {
         let idx = self.idx + i;
         &mut self.info[idx]
     }
@@ -508,21 +572,25 @@ impl hb_buffer_t {
     }
 
     #[inline]
-    pub fn prev(&self) -> &hb_glyph_info_t {
+    pub fn prev(&self) -> &GlyphInfo {
         let idx = self.out_len.saturating_sub(1);
         &self.out_info()[idx]
     }
 
     #[inline]
-    pub fn prev_mut(&mut self) -> &mut hb_glyph_info_t {
+    pub fn prev_mut(&mut self) -> &mut GlyphInfo {
         let idx = self.out_len.saturating_sub(1);
         &mut self.out_info_mut()[idx]
     }
 
-    pub fn digest(&self) -> hb_set_digest_t {
-        let mut digest = hb_set_digest_t::new();
-        digest.add_array(self.info.iter().map(|i| GlyphId::new(i.glyph_id)));
-        digest
+    pub fn update_digest(&mut self) {
+        self.digest = hb_set_digest_t::new();
+        self.digest.add_array(self.info.iter().map(|i| i.glyph_id));
+    }
+    pub fn update_glyph_set(&mut self) {
+        self.glyph_set.clear();
+        self.glyph_set
+            .extend_unsorted(self.info.iter().map(|i| i.glyph_id));
     }
 
     fn clear(&mut self) {
@@ -541,10 +609,7 @@ impl hb_buffer_t {
         self.out_len = 0;
         self.have_separate_output = false;
 
-        self.context = [
-            ['\0', '\0', '\0', '\0', '\0'],
-            ['\0', '\0', '\0', '\0', '\0'],
-        ];
+        self.context = Default::default();
         self.context_len = [0, 0];
 
         self.serial = 0;
@@ -583,16 +648,11 @@ impl hb_buffer_t {
         if !self.ensure(self.len + 1) {
             return;
         }
-
-        let i = self.len;
-        self.info[i] = hb_glyph_info_t {
+        self.info[self.len] = GlyphInfo {
             glyph_id: codepoint,
-            mask: 0,
             cluster,
-            var1: 0,
-            var2: 0,
+            ..GlyphInfo::default()
         };
-
         self.len += 1;
     }
 
@@ -618,7 +678,7 @@ impl hb_buffer_t {
 
     pub fn reverse_groups<F>(&mut self, group: F, merge_clusters: bool)
     where
-        F: Fn(&hb_glyph_info_t, &hb_glyph_info_t) -> bool,
+        F: Fn(&GlyphInfo, &GlyphInfo) -> bool,
     {
         if self.is_empty() {
             return;
@@ -651,7 +711,7 @@ impl hb_buffer_t {
 
     pub fn group_end<F>(&self, mut start: usize, group: F) -> usize
     where
-        F: Fn(&hb_glyph_info_t, &hb_glyph_info_t) -> bool,
+        F: Fn(&GlyphInfo, &GlyphInfo) -> bool,
     {
         start += 1;
 
@@ -672,8 +732,8 @@ impl hb_buffer_t {
     pub fn guess_segment_properties(&mut self) {
         if self.script.is_none() {
             for info in &self.info {
-                match info.as_char().script() {
-                    crate::script::COMMON | crate::script::INHERITED | crate::script::UNKNOWN => {}
+                match info.as_codepoint().script() {
+                    script::COMMON | script::INHERITED | script::UNKNOWN => {}
                     s => {
                         self.script = Some(s);
                         break;
@@ -696,8 +756,8 @@ impl hb_buffer_t {
     }
 
     pub fn sync(&mut self) -> bool {
-        assert!(self.have_output);
-        assert!(self.idx <= self.len);
+        debug_assert!(self.have_output);
+        debug_assert!(self.idx <= self.len);
 
         if !self.successful {
             self.have_output = false;
@@ -711,7 +771,7 @@ impl hb_buffer_t {
         if self.have_separate_output {
             // Swap info and pos buffers.
             let info: Vec<GlyphPosition> = bytemuck::cast_vec(core::mem::take(&mut self.info));
-            let pos: Vec<hb_glyph_info_t> = bytemuck::cast_vec(core::mem::take(&mut self.pos));
+            let pos: Vec<GlyphInfo> = bytemuck::cast_vec(core::mem::take(&mut self.pos));
             self.pos = info;
             self.info = pos;
             self.have_separate_output = false;
@@ -751,7 +811,7 @@ impl hb_buffer_t {
             return;
         }
 
-        assert!(self.idx + num_in <= self.len);
+        debug_assert!(self.idx + num_in <= self.len);
 
         self.merge_clusters(self.idx, self.idx + num_in);
 
@@ -804,7 +864,7 @@ impl hb_buffer_t {
         self.out_len += 1;
     }
 
-    pub fn output_info(&mut self, glyph_info: hb_glyph_info_t) {
+    pub fn output_info(&mut self, glyph_info: GlyphInfo) {
         if !self.make_room_for(0, 1) {
             return;
         }
@@ -826,14 +886,16 @@ impl hb_buffer_t {
     /// Copies glyph at idx to output and advance idx.
     ///
     /// If there's no output, just advance idx.
+    #[inline(always)]
     pub fn next_glyph(&mut self) {
         if self.have_output {
             if self.have_separate_output || self.out_len != self.idx {
-                if !self.make_room_for(1, 1) {
+                if !self.ensure(self.out_len + 1) {
                     return;
                 }
 
-                self.set_out_info(self.out_len, self.info[self.idx]);
+                let i = self.out_len;
+                self.out_info_mut()[i] = self.info[self.idx];
             }
 
             self.out_len += 1;
@@ -848,7 +910,7 @@ impl hb_buffer_t {
     pub fn next_glyphs(&mut self, n: usize) {
         if self.have_output {
             if self.have_separate_output || self.out_len != self.idx {
-                if !self.make_room_for(n, n) {
+                if !self.ensure(self.out_len + n) {
                     return;
                 }
 
@@ -888,6 +950,11 @@ impl hb_buffer_t {
         let not_mask = !mask;
         value &= mask;
 
+        self.max_ops -= self.len as i32;
+        if self.max_ops < 0 {
+            self.successful = false;
+        }
+
         if cluster_start == 0 && cluster_end == u32::MAX {
             for info in &mut self.info[..self.len] {
                 info.mask = (info.mask & not_mask) | value;
@@ -903,12 +970,13 @@ impl hb_buffer_t {
         }
     }
 
+    #[inline(always)]
     pub fn merge_clusters(&mut self, start: usize, end: usize) {
         if end - start < 2 {
             return;
         }
 
-        self.merge_clusters_impl(start, end)
+        self.merge_clusters_impl(start, end);
     }
 
     fn merge_clusters_impl(&mut self, mut start: usize, mut end: usize) {
@@ -917,11 +985,16 @@ impl hb_buffer_t {
             return;
         }
 
-        let mut cluster = self.info[start].cluster;
-
-        for i in start + 1..end {
-            cluster = core::cmp::min(cluster, self.info[i].cluster);
+        self.max_ops -= (end - start) as i32;
+        if self.max_ops < 0 {
+            self.successful = false;
         }
+
+        let cluster = self.info[start..end]
+            .iter()
+            .map(|info| info.cluster)
+            .min()
+            .unwrap();
 
         // Extend end
         if cluster != self.info[end - 1].cluster {
@@ -946,8 +1019,8 @@ impl hb_buffer_t {
             }
         }
 
-        for i in start..end {
-            Self::set_cluster(&mut self.info[i], cluster, 0);
+        for info in &mut self.info[start..end] {
+            Self::set_cluster(info, cluster, 0);
         }
     }
 
@@ -960,11 +1033,16 @@ impl hb_buffer_t {
             return;
         }
 
-        let mut cluster = self.out_info()[start].cluster;
-
-        for i in start + 1..end {
-            cluster = core::cmp::min(cluster, self.out_info()[i].cluster);
+        self.max_ops -= (end - start) as i32;
+        if self.max_ops < 0 {
+            self.successful = false;
         }
+
+        let cluster = self.out_info()[start..end]
+            .iter()
+            .map(|info| info.cluster)
+            .min()
+            .unwrap();
 
         // Extend start
         while start != 0 && self.out_info()[start - 1].cluster == self.out_info()[start].cluster {
@@ -986,8 +1064,8 @@ impl hb_buffer_t {
             }
         }
 
-        for i in start..end {
-            Self::set_cluster(&mut self.out_info_mut()[i], cluster, 0);
+        for info in &mut self.out_info_mut()[start..end] {
+            Self::set_cluster(info, cluster, 0);
         }
     }
 
@@ -1028,7 +1106,7 @@ impl hb_buffer_t {
         self.skip_glyph();
     }
 
-    pub fn delete_glyphs_inplace(&mut self, filter: impl Fn(&hb_glyph_info_t) -> bool) {
+    pub fn delete_glyphs_inplace(&mut self, filter: impl Fn(&GlyphInfo) -> bool) {
         // Merge clusters and delete filtered glyphs.
         // NOTE! We can't use out-buffer as we have positioning data.
         let mut j = 0;
@@ -1100,6 +1178,52 @@ impl hb_buffer_t {
         self._set_glyph_flags(SAFE_TO_INSERT_TATWEEL, start, end, Some(true), None);
     }
 
+    fn _set_glyph_flags_impl(
+        &mut self,
+        mask: hb_mask_t,
+        start: usize,
+        end: usize,
+        interior: bool,
+        from_out_buffer: bool,
+    ) {
+        if !from_out_buffer || !self.have_output {
+            if !interior {
+                for info in &mut self.info[start..end] {
+                    info.mask |= mask;
+                }
+            } else {
+                let cluster = self._infos_find_min_cluster(&self.info, start, end, None);
+                self._infos_set_glyph_flags(false, start, end, cluster, mask);
+            }
+        } else {
+            debug_assert!(start <= self.out_len);
+            debug_assert!(self.idx <= end);
+
+            if !interior {
+                let range_end = self.out_len;
+                for info in &mut self.out_info_mut()[start..range_end] {
+                    info.mask |= mask;
+                }
+
+                for info in &mut self.info[self.idx..end] {
+                    info.mask |= mask;
+                }
+            } else {
+                let mut cluster = self._infos_find_min_cluster(&self.info, self.idx, end, None);
+                cluster = self._infos_find_min_cluster(
+                    self.out_info(),
+                    start,
+                    self.out_len,
+                    Some(cluster),
+                );
+
+                let out_len = self.out_len;
+                self._infos_set_glyph_flags(true, start, out_len, cluster, mask);
+                self._infos_set_glyph_flags(false, self.idx, end, cluster, mask);
+            }
+        }
+    }
+
     /// Adds glyph flags in mask to infos with clusters between start and end.
     /// The start index will be from out-buffer if from_out_buffer is true.
     /// If interior is true, then the cluster having the minimum value is skipped. */
@@ -1128,43 +1252,7 @@ impl hb_buffer_t {
             return;
         }
 
-        self.scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_GLYPH_FLAGS;
-
-        if !from_out_buffer || !self.have_output {
-            if !interior {
-                for i in start..end {
-                    self.info[i].mask |= mask;
-                }
-            } else {
-                let cluster = self._infos_find_min_cluster(&self.info, start, end, None);
-                self._infos_set_glyph_flags(false, start, end, cluster, mask);
-            }
-        } else {
-            assert!(start <= self.out_len);
-            assert!(self.idx <= end);
-
-            if !interior {
-                for i in start..self.out_len {
-                    self.out_info_mut()[i].mask |= mask;
-                }
-
-                for i in self.idx..end {
-                    self.info[i].mask |= mask;
-                }
-            } else {
-                let mut cluster = self._infos_find_min_cluster(&self.info, self.idx, end, None);
-                cluster = self._infos_find_min_cluster(
-                    self.out_info(),
-                    start,
-                    self.out_len,
-                    Some(cluster),
-                );
-
-                let out_len = self.out_len;
-                self._infos_set_glyph_flags(true, start, out_len, cluster, mask);
-                self._infos_set_glyph_flags(false, self.idx, end, cluster, mask);
-            }
-        }
+        self._set_glyph_flags_impl(mask, start, end, interior, from_out_buffer);
     }
 
     pub fn unsafe_to_concat(&mut self, start: Option<usize>, end: Option<usize>) {
@@ -1195,7 +1283,7 @@ impl hb_buffer_t {
 
     pub fn move_to(&mut self, i: usize) -> bool {
         if !self.have_output {
-            assert!(i <= self.len);
+            debug_assert!(i <= self.len);
             self.idx = i;
             return true;
         }
@@ -1204,7 +1292,7 @@ impl hb_buffer_t {
             return false;
         }
 
-        assert!(i <= self.out_len + (self.len - self.idx));
+        debug_assert!(i <= self.out_len + (self.len - self.idx));
 
         if self.out_len < i {
             let count = i - self.out_len;
@@ -1229,11 +1317,11 @@ impl hb_buffer_t {
             // But that would leave empty slots in the buffer in case of allocation
             // failures.  See comments in shift_forward().  This can cause O(N^2)
             // behavior more severely than adding 32 empty slots can...
-            if self.idx < count {
-                self.shift_forward(count - self.idx);
+            if self.idx < count && !self.shift_forward(count - self.idx) {
+                return false;
             }
 
-            assert!(self.idx >= count);
+            debug_assert!(self.idx >= count);
 
             self.idx -= count;
             self.out_len -= count;
@@ -1247,17 +1335,23 @@ impl hb_buffer_t {
     }
 
     #[must_use]
+    #[inline(always)]
     pub fn ensure(&mut self, size: usize) -> bool {
         if size <= self.info.len() {
-            return true;
+            true
+        } else {
+            self.enlarge(size)
         }
+    }
 
+    #[must_use]
+    fn enlarge(&mut self, size: usize) -> bool {
         if size > self.max_len {
             self.successful = false;
             return false;
         }
 
-        self.info.resize(size, hb_glyph_info_t::default());
+        self.info.resize(size, GlyphInfo::default());
         self.pos.resize(size, GlyphPosition::default());
         true
     }
@@ -1269,7 +1363,7 @@ impl hb_buffer_t {
         }
 
         if !self.have_separate_output && self.out_len + num_out > self.idx + num_in {
-            assert!(self.have_output);
+            debug_assert!(self.have_output);
 
             self.have_separate_output = true;
             for i in 0..self.out_len {
@@ -1280,10 +1374,16 @@ impl hb_buffer_t {
         true
     }
 
-    fn shift_forward(&mut self, count: usize) {
-        assert!(self.have_output);
+    fn shift_forward(&mut self, count: usize) -> bool {
+        debug_assert!(self.have_output);
         if !self.ensure(self.len + count) {
-            return;
+            return false;
+        }
+
+        self.max_ops -= (self.len - self.idx) as i32;
+        if self.max_ops < 0 {
+            self.successful = false;
+            return false;
         }
 
         for i in (0..(self.len - self.idx)).rev() {
@@ -1292,25 +1392,22 @@ impl hb_buffer_t {
 
         if self.idx + count > self.len {
             for info in &mut self.info[self.len..self.idx + count] {
-                *info = hb_glyph_info_t::default();
+                *info = GlyphInfo::default();
             }
         }
 
         self.len += count;
         self.idx += count;
+
+        true
     }
 
     fn clear_context(&mut self, side: usize) {
         self.context_len[side] = 0;
     }
 
-    pub fn sort(
-        &mut self,
-        start: usize,
-        end: usize,
-        cmp: impl Fn(&hb_glyph_info_t, &hb_glyph_info_t) -> bool,
-    ) {
-        assert!(!self.have_positions);
+    pub fn sort(&mut self, start: usize, end: usize, cmp: impl Fn(&GlyphInfo, &GlyphInfo) -> bool) {
+        debug_assert!(!self.have_positions);
 
         for i in start + 1..end {
             let mut j = i;
@@ -1336,7 +1433,7 @@ impl hb_buffer_t {
         }
     }
 
-    pub fn set_cluster(info: &mut hb_glyph_info_t, cluster: u32, mask: hb_mask_t) {
+    pub fn set_cluster(info: &mut GlyphInfo, cluster: u32, mask: hb_mask_t) {
         if info.cluster != cluster {
             info.mask = (info.mask & !glyph_flag::DEFINED) | (mask & glyph_flag::DEFINED);
         }
@@ -1347,7 +1444,6 @@ impl hb_buffer_t {
     // Called around shape()
     pub(crate) fn enter(&mut self) {
         self.serial = 0;
-        self.shaping_failed = false;
         self.scratch_flags = HB_BUFFER_SCRATCH_FLAG_DEFAULT;
 
         if let Some(len) = self.len.checked_mul(hb_buffer_t::MAX_LEN_FACTOR) {
@@ -1366,12 +1462,11 @@ impl hb_buffer_t {
         self.max_len = hb_buffer_t::MAX_LEN_DEFAULT;
         self.max_ops = hb_buffer_t::MAX_OPS_DEFAULT;
         self.serial = 0;
-        // Intentionally not resetting shaping_failed, such that it can be inspected.
     }
 
     fn _infos_find_min_cluster(
         &self,
-        info: &[hb_glyph_info_t],
+        info: &[GlyphInfo],
         start: usize,
         end: usize,
         cluster: Option<u32>,
@@ -1384,13 +1479,14 @@ impl hb_buffer_t {
 
         if self.cluster_level == HB_BUFFER_CLUSTER_LEVEL_MONOTONE_CHARACTERS {
             for glyph_info in &info[start..end] {
-                cluster = core::cmp::min(cluster, glyph_info.cluster);
+                cluster = min(cluster, glyph_info.cluster);
             }
         }
 
         cluster.min(info[start].cluster.min(info[end - 1].cluster))
     }
 
+    #[inline(always)]
     fn _infos_set_glyph_flags(
         &mut self,
         out_info: bool,
@@ -1399,8 +1495,6 @@ impl hb_buffer_t {
         cluster: u32,
         mask: hb_mask_t,
     ) {
-        let mut apply_scratch_flags = false;
-
         if start == end {
             return;
         }
@@ -1419,15 +1513,10 @@ impl hb_buffer_t {
         if cluster_level == HB_BUFFER_CLUSTER_LEVEL_CHARACTERS
             || (cluster != cluster_first && cluster != cluster_last)
         {
-            for i in start..end {
-                if infos[i].cluster != cluster {
-                    apply_scratch_flags = true;
-                    infos[i].mask |= mask;
+            for info in &mut infos[start..end] {
+                if info.cluster != cluster {
+                    info.mask |= mask;
                 }
-            }
-
-            if apply_scratch_flags {
-                self.scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_GLYPH_FLAGS;
             }
 
             return;
@@ -1438,7 +1527,6 @@ impl hb_buffer_t {
             let mut i = end;
             while start < i && infos[i - 1].cluster != cluster_first {
                 if cluster != infos[i - 1].cluster {
-                    apply_scratch_flags = true;
                     infos[i - 1].mask |= mask;
                 }
 
@@ -1448,16 +1536,11 @@ impl hb_buffer_t {
             let mut i = start;
             while i < end && infos[i].cluster != cluster_last {
                 if cluster != infos[i].cluster {
-                    apply_scratch_flags = true;
                     infos[i].mask |= mask;
                 }
 
                 i += 1;
             }
-        }
-
-        if apply_scratch_flags {
-            self.scratch_flags |= HB_BUFFER_SCRATCH_FLAG_HAS_GLYPH_FLAGS;
         }
     }
 
@@ -1472,14 +1555,19 @@ impl hb_buffer_t {
         }
 
         for (i, c) in text.char_indices() {
-            self.add(c as u32, i as u32);
+            self.info[self.len] = GlyphInfo {
+                glyph_id: c as u32,
+                cluster: i as u32,
+                ..GlyphInfo::default()
+            };
+            self.len += 1;
         }
     }
 
     fn set_pre_context(&mut self, text: &str) {
         self.clear_context(0);
         for (i, c) in text.chars().rev().enumerate().take(CONTEXT_LENGTH) {
-            self.context[0][i] = c;
+            self.context[0][i] = c as Codepoint;
             self.context_len[0] += 1;
         }
     }
@@ -1487,7 +1575,7 @@ impl hb_buffer_t {
     fn set_post_context(&mut self, text: &str) {
         self.clear_context(1);
         for (i, c) in text.chars().enumerate().take(CONTEXT_LENGTH) {
-            self.context[1][i] = c;
+            self.context[1][i] = c as Codepoint;
             self.context_len[1] += 1;
         }
     }
@@ -1518,7 +1606,7 @@ impl hb_buffer_t {
     }
 }
 
-pub(crate) fn _cluster_group_func(a: &hb_glyph_info_t, b: &hb_glyph_info_t) -> bool {
+pub(crate) fn _cluster_group_func(a: &GlyphInfo, b: &GlyphInfo) -> bool {
     a.cluster == b.cluster
 }
 
@@ -1526,7 +1614,7 @@ pub(crate) fn _cluster_group_func(a: &hb_glyph_info_t, b: &hb_glyph_info_t) -> b
 
 macro_rules! foreach_cluster {
     ($buffer:expr, $start:ident, $end:ident, $($body:tt)*) => {
-        foreach_group!($buffer, $start, $end, crate::hb::buffer::_cluster_group_func, $($body)*)
+        foreach_group!($buffer, $start, $end, $crate::hb::buffer::_cluster_group_func, $($body)*)
     };
 }
 
@@ -1558,7 +1646,7 @@ macro_rules! foreach_syllable {
 
 macro_rules! foreach_grapheme {
     ($buffer:expr, $start:ident, $end:ident, $($body:tt)*) => {
-        foreach_group!($buffer, $start, $end, crate::hb::ot_layout::_hb_grapheme_group_func, $($body)*)
+        foreach_group!($buffer, $start, $end, $crate::hb::ot_layout::_hb_grapheme_group_func, $($body)*)
     };
 }
 
@@ -1589,27 +1677,28 @@ bitflags::bitflags! {
         const CLASS_MASK    = Self::BASE_GLYPH.bits() | Self::LIGATURE.bits() | Self::MARK.bits();
 
         // The following are used internally; not derived from GDEF.
-        const SUBSTITUTED   = 0x10;
-        const LIGATED       = 0x20;
-        const MULTIPLIED    = 0x40;
+        const MATCHES       = 0x10;
+        const SUBSTITUTED   = 0x20;
+        const LIGATED       = 0x40;
+        const MULTIPLIED    = 0x80;
 
         const PRESERVE      = Self::SUBSTITUTED.bits() | Self::LIGATED.bits() | Self::MULTIPLIED.bits();
     }
 }
 
 pub type hb_buffer_scratch_flags_t = u32;
-pub const HB_BUFFER_SCRATCH_FLAG_DEFAULT: u32 = 0x00000000;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_NON_ASCII: u32 = 0x00000001;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_DEFAULT_IGNORABLES: u32 = 0x00000002;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_SPACE_FALLBACK: u32 = 0x00000004;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_GPOS_ATTACHMENT: u32 = 0x00000008;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_CGJ: u32 = 0x00000010;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_GLYPH_FLAGS: u32 = 0x00000020;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_BROKEN_SYLLABLE: u32 = 0x00000040;
-pub const HB_BUFFER_SCRATCH_FLAG_HAS_VARIATION_SELECTOR_FALLBACK: u32 = 0x00000080;
+pub const HB_BUFFER_SCRATCH_FLAG_DEFAULT: u32 = 0x0000_0000;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_FRACTION_SLASH: u32 = 0x0000_0001;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_DEFAULT_IGNORABLES: u32 = 0x0000_0002;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_SPACE_FALLBACK: u32 = 0x0000_0004;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_GPOS_ATTACHMENT: u32 = 0x0000_0008;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_CGJ: u32 = 0x0000_0010;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_BROKEN_SYLLABLE: u32 = 0x0000_0020;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_VARIATION_SELECTOR_FALLBACK: u32 = 0x0000_0040;
+pub const HB_BUFFER_SCRATCH_FLAG_HAS_CONTINUATIONS: u32 = 0x0000_0080;
 
 /* Reserved for shapers' internal use. */
-pub const HB_BUFFER_SCRATCH_FLAG_SHAPER0: u32 = 0x01000000;
+pub const HB_BUFFER_SCRATCH_FLAG_SHAPER0: u32 = 0x0100_0000;
 // pub const HB_BUFFER_SCRATCH_FLAG_SHAPER1: u32 = 0x02000000;
 // pub const HB_BUFFER_SCRATCH_FLAG_SHAPER2: u32 = 0x04000000;
 // pub const HB_BUFFER_SCRATCH_FLAG_SHAPER3: u32 = 0x08000000;
@@ -1633,6 +1722,11 @@ impl UnicodeBuffer {
         self.0.len
     }
 
+    /// Ensures that the buffer can hold at least `size` codepoints.
+    pub fn reserve(&mut self, size: usize) -> bool {
+        self.0.ensure(size)
+    }
+
     /// Returns `true` if the buffer contains no elements.
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -1648,13 +1742,13 @@ impl UnicodeBuffer {
     /// Sets the pre-context for this buffer.
     #[inline]
     pub fn set_pre_context(&mut self, str: &str) {
-        self.0.set_pre_context(str)
+        self.0.set_pre_context(str);
     }
 
     /// Sets the post-context for this buffer.
     #[inline]
     pub fn set_post_context(&mut self, str: &str) {
-        self.0.set_post_context(str)
+        self.0.set_post_context(str);
     }
 
     /// Appends a character to a buffer with the given cluster value.
@@ -1696,7 +1790,7 @@ impl UnicodeBuffer {
     /// Set the glyph value to replace not-found variation-selector characters with.
     #[inline]
     pub fn set_not_found_variation_selector_glyph(&mut self, glyph: u32) {
-        self.0.not_found_variation_selector = Some(glyph)
+        self.0.not_found_variation_selector = Some(glyph);
     }
 
     /// Get the buffer language.
@@ -1709,7 +1803,7 @@ impl UnicodeBuffer {
     /// current buffer.
     #[inline]
     pub fn guess_segment_properties(&mut self) {
-        self.0.guess_segment_properties()
+        self.0.guess_segment_properties();
     }
 
     /// Set the flags for this buffer.
@@ -1756,7 +1850,7 @@ impl UnicodeBuffer {
     /// Clear the contents of the buffer.
     #[inline]
     pub fn clear(&mut self) {
-        self.0.clear()
+        self.0.clear();
     }
 }
 
@@ -1799,7 +1893,7 @@ impl GlyphBuffer {
 
     /// Get the glyph infos.
     #[inline]
-    pub fn glyph_infos(&self) -> &[hb_glyph_info_t] {
+    pub fn glyph_infos(&self) -> &[GlyphInfo] {
         &self.0.info[0..self.0.len]
     }
 
@@ -1837,6 +1931,8 @@ impl GlyphBuffer {
         let mut y = 0;
         let names = face.glyph_names();
         for (info, pos) in info.iter().zip(pos) {
+            s.push(if s.is_empty() { '[' } else { '|' });
+
             if !flags.contains(SerializeFlags::NO_GLYPH_NAMES) {
                 match names.get(info.as_glyph().to_u32()) {
                     Some(name) => s.push_str(name),
@@ -1883,13 +1979,10 @@ impl GlyphBuffer {
                 x += pos.x_advance;
                 y += pos.y_advance;
             }
-
-            s.push('|');
         }
 
-        // Remove last `|`.
         if !s.is_empty() {
-            s.pop();
+            s.push(']');
         }
 
         Ok(s)

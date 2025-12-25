@@ -18,7 +18,7 @@ jobs:
         rust: [stable]
     steps:
     - name: Checkout
-      uses: actions/checkout@v2
+      uses: actions/checkout@v5
 
     - name: Build without std
       run: cargo build --no-default-features
@@ -26,8 +26,8 @@ jobs:
     - name: Build with std
       run: cargo build
 
-    - name: MSRV Build (Rust 1.75)
-      run: cargo +1.75 build
+    - name: MSRV Build (Rust 1.82)
+      run: cargo +1.82 build
 
     - name: Run tests
       run: cargo test --verbose

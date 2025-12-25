@@ -1,5 +1,6 @@
-use super::buffer::{hb_buffer_t, HB_BUFFER_SCRATCH_FLAG_HAS_BROKEN_SYLLABLE};
-use super::{hb_font_t, hb_glyph_info_t};
+use super::buffer::*;
+use super::ot_shape_plan::hb_ot_shape_plan_t;
+use super::{hb_font_t, GlyphInfo};
 use crate::BufferFlags;
 
 pub fn insert_dotted_circles(
@@ -26,9 +27,9 @@ pub fn insert_dotted_circles(
         None => return false,
     };
 
-    let mut dottedcircle = hb_glyph_info_t {
+    let mut dottedcircle = GlyphInfo {
         glyph_id: 0x25CC,
-        ..hb_glyph_info_t::default()
+        ..GlyphInfo::default()
     };
     dottedcircle.set_ot_shaper_var_u8_category(dottedcircle_category);
     if let Some(dottedcircle_position) = dottedcircle_position {
@@ -69,4 +70,17 @@ pub fn insert_dotted_circles(
     buffer.sync();
 
     true
+}
+
+pub(crate) fn syllabic_clear_var(
+    _: &hb_ot_shape_plan_t,
+    _: &hb_font_t,
+    buffer: &mut hb_buffer_t,
+) -> bool {
+    for info in &mut buffer.info {
+        info.set_syllable(0);
+    }
+    buffer.deallocate_var(GlyphInfo::SYLLABLE_VAR);
+
+    false
 }

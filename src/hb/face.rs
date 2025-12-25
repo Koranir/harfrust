@@ -1,23 +1,24 @@
-#[cfg(not(feature = "std"))]
-#[allow(unused_imports)]
-use core_maths::CoreFloat;
 use read_fonts::types::{F2Dot14, Fixed, GlyphId};
 use read_fonts::{FontRef, TableProvider};
 use smallvec::SmallVec;
 
 use super::aat::AatTables;
-use super::buffer::GlyphPropsFlags;
 use super::charmap::{cache_t as cmap_cache_t, Charmap};
 use super::glyph_metrics::GlyphMetrics;
 use super::glyph_names::GlyphNames;
 use super::ot::{LayoutTable, OtCache, OtTables};
 use super::ot_layout::TableIndex;
 use super::ot_shape::{hb_ot_shape_context_t, shape_internal};
+use crate::hb::aat::AatCache;
+use crate::hb::buffer::hb_buffer_t;
+use crate::hb::tables::TableRanges;
 use crate::{script, Feature, GlyphBuffer, NormalizedCoord, ShapePlan, UnicodeBuffer, Variation};
 
 /// Data required for shaping with a single font.
 pub struct ShaperData {
+    table_ranges: TableRanges,
     ot_cache: OtCache,
+    aat_cache: AatCache,
     cmap_cache: cmap_cache_t,
 }
 
@@ -25,9 +26,13 @@ impl ShaperData {
     /// Creates new cached shaper data for the given font.
     pub fn new(font: &FontRef) -> Self {
         let ot_cache = OtCache::new(font);
+        let aat_cache = AatCache::new(font);
+        let table_ranges = TableRanges::new(font);
         let cmap_cache = cmap_cache_t::new();
         Self {
+            table_ranges,
             ot_cache,
+            aat_cache,
             cmap_cache,
         }
     }
@@ -54,6 +59,7 @@ const MAX_INLINE_COORDS: usize = 11;
 #[derive(Clone, Default, Debug)]
 pub struct ShaperInstance {
     coords: SmallVec<[F2Dot14; MAX_INLINE_COORDS]>,
+    pub(crate) feature_variations: [Option<u32>; 2],
     // TODO: this is a good place to hang variation specific caches
 }
 
@@ -109,11 +115,12 @@ impl ShaperInstance {
                 font.avar().ok().as_ref(),
                 variations
                     .into_iter()
-                    .map(|var| var.into())
+                    .map(Into::into)
                     .map(|var| (var.tag, Fixed::from_f64(var.value as _))),
                 self.coords.as_mut_slice(),
             );
             self.check_default();
+            self.set_feature_variations(font);
         }
     }
 
@@ -125,6 +132,7 @@ impl ShaperInstance {
             self.coords.reserve(count);
             self.coords.extend(coords.into_iter().take(count));
             self.check_default();
+            self.set_feature_variations(font);
         }
     }
 
@@ -145,6 +153,21 @@ impl ShaperInstance {
                 );
             }
         }
+    }
+
+    fn set_feature_variations(&mut self, font: &FontRef) {
+        self.feature_variations = [None; 2];
+        if self.coords.is_empty() {
+            return;
+        }
+        self.feature_variations[0] = font
+            .gsub()
+            .ok()
+            .and_then(|t| LayoutTable::Gsub(t).feature_variation_index(&self.coords));
+        self.feature_variations[1] = font
+            .gpos()
+            .ok()
+            .and_then(|t| LayoutTable::Gpos(t).feature_variation_index(&self.coords));
     }
 
     fn check_default(&mut self) {
@@ -182,19 +205,24 @@ impl<'a> ShaperBuilder<'a> {
     /// Builds the shaper with the current configuration.
     pub fn build(self) -> crate::Shaper<'a> {
         let font = self.font;
-        let units_per_em = font.head().map(|head| head.units_per_em()).unwrap_or(1000);
-        let charmap = Charmap::new(&font, &self.data.cmap_cache);
-        let glyph_metrics = GlyphMetrics::new(&font);
-        let coords = self
+        let units_per_em = self.data.table_ranges.units_per_em;
+        let charmap = Charmap::new(&font, &self.data.table_ranges, &self.data.cmap_cache);
+        let glyph_metrics = GlyphMetrics::new(&font, &self.data.table_ranges);
+        let (coords, feature_variations) = self
             .instance
-            .map(|instance| instance.coords())
+            .map(|instance| (instance.coords(), instance.feature_variations))
             .unwrap_or_default();
-        let ot_tables = OtTables::new(&font, &self.data.ot_cache, coords);
-        let aat_tables = AatTables::new(&font);
+        let ot_tables = OtTables::new(
+            &font,
+            &self.data.ot_cache,
+            &self.data.table_ranges,
+            coords,
+            feature_variations,
+        );
+        let aat_tables = AatTables::new(&font, &self.data.aat_cache, &self.data.table_ranges);
         hb_font_t {
             font,
             units_per_em,
-            pixels_per_em: None,
             points_per_em: self.point_size,
             charmap,
             glyph_metrics,
@@ -209,7 +237,6 @@ impl<'a> ShaperBuilder<'a> {
 pub struct hb_font_t<'a> {
     pub(crate) font: FontRef<'a>,
     pub(crate) units_per_em: u16,
-    pixels_per_em: Option<(u16, u16)>,
     pub(crate) points_per_em: Option<f32>,
     charmap: Charmap<'a>,
     glyph_metrics: GlyphMetrics<'a>,
@@ -269,8 +296,15 @@ impl<'a> crate::Shaper<'a> {
         let mut buffer = buffer.0;
         buffer.enter();
 
-        debug_assert_eq!(buffer.direction, plan.direction);
-        debug_assert_eq!(
+        assert_eq!(
+            buffer.direction, plan.direction,
+            "Buffer direction does not match plan direction: {:?} != {:?}",
+            buffer.direction, plan.direction
+        );
+        assert_eq!(
+            buffer.script.unwrap_or(script::UNKNOWN),
+            plan.script.unwrap_or(script::UNKNOWN),
+            "Buffer script does not match plan script: {:?} != {:?}",
             buffer.script.unwrap_or(script::UNKNOWN),
             plan.script.unwrap_or(script::UNKNOWN)
         );
@@ -287,12 +321,9 @@ impl<'a> crate::Shaper<'a> {
             });
         }
 
-        GlyphBuffer(buffer)
-    }
+        buffer.leave();
 
-    #[inline]
-    pub(crate) fn pixels_per_em(&self) -> Option<(u16, u16)> {
-        self.pixels_per_em
+        GlyphBuffer(buffer)
     }
 
     pub(crate) fn has_glyph(&self, c: u32) -> bool {
@@ -303,14 +334,18 @@ impl<'a> crate::Shaper<'a> {
         self.charmap.map(c)
     }
 
-    pub(crate) fn get_nominal_variant_glyph(&self, c: char, vs: char) -> Option<GlyphId> {
-        self.charmap.map_variant(c as u32, vs as u32)
+    pub(crate) fn get_nominal_variant_glyph(&self, c: u32, vs: u32) -> Option<GlyphId> {
+        self.charmap.map_variant(c, vs)
     }
 
     pub(crate) fn glyph_h_advance(&self, glyph: GlyphId) -> i32 {
         self.glyph_metrics
             .advance_width(glyph, self.ot_tables.coords)
             .unwrap_or_default()
+    }
+    pub(crate) fn glyph_h_advances(&self, buffer: &mut hb_buffer_t) {
+        self.glyph_metrics
+            .populate_advance_widths(buffer, self.ot_tables.coords);
     }
 
     pub(crate) fn glyph_v_advance(&self, glyph: GlyphId) -> i32 {
@@ -348,19 +383,6 @@ impl<'a> crate::Shaper<'a> {
 
     pub(crate) fn glyph_names(&self) -> GlyphNames<'a> {
         GlyphNames::new(&self.font)
-    }
-
-    pub(crate) fn glyph_props(&self, glyph: GlyphId) -> u16 {
-        let glyph = glyph.to_u32();
-        match self.ot_tables.glyph_class(glyph) {
-            1 => GlyphPropsFlags::BASE_GLYPH.bits(),
-            2 => GlyphPropsFlags::LIGATURE.bits(),
-            3 => {
-                let class = self.ot_tables.glyph_mark_attachment_class(glyph);
-                (class << 8) | GlyphPropsFlags::MARK.bits()
-            }
-            _ => 0,
-        }
     }
 
     pub(crate) fn layout_table(&self, table_index: TableIndex) -> Option<LayoutTable<'a>> {

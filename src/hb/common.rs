@@ -1,14 +1,12 @@
-use alloc::string::String;
 use core::{
     ops::{Bound, RangeBounds},
     str::FromStr,
 };
+use smallvec::SmallVec;
 
 use read_fonts::types::Tag;
 
 use super::text_parser::TextParser;
-
-pub type hb_codepoint_t = char; // uint32_t in C++
 
 pub const HB_FEATURE_GLOBAL_START: u32 = 0;
 pub const HB_FEATURE_GLOBAL_END: u32 = u32::MAX;
@@ -143,7 +141,10 @@ impl Direction {
             script::OLD_UYGHUR |
 
             // Unicode-16.0 additions
-            script::GARAY => {
+            script::GARAY |
+
+            // Unicode-17.0 additions
+            script::SIDETIC => {
                 Some(Direction::RightToLeft)
             }
 
@@ -167,7 +168,7 @@ impl Default for Direction {
     }
 }
 
-impl core::str::FromStr for Direction {
+impl FromStr for Direction {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -186,24 +187,45 @@ impl core::str::FromStr for Direction {
     }
 }
 
-/// A script language.
+type SmallVecLanguage = SmallVec<[u8; 8]>;
+
+/// A language tag.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub struct Language(String);
+pub struct Language(SmallVecLanguage);
 
 impl Language {
     /// Returns the language as a string.
     #[inline]
     pub fn as_str(&self) -> &str {
-        self.0.as_str()
+        core::str::from_utf8(&self.0).unwrap_or_default()
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Self {
+        if bytes.is_empty() {
+            Language(SmallVec::new())
+        } else {
+            let mut bytes = SmallVecLanguage::from_slice(bytes);
+
+            // Convert uppercase to lowercase and replace '_' with '-'.
+            for b in &mut bytes.iter_mut() {
+                if b.is_ascii_uppercase() {
+                    *b = b.to_ascii_lowercase();
+                } else if *b == b'_' {
+                    *b = b'-';
+                }
+            }
+
+            Language(bytes)
+        }
     }
 }
 
-impl core::str::FromStr for Language {
+impl FromStr for Language {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if !s.is_empty() {
-            Ok(Language(s.to_ascii_lowercase()))
+            Ok(Language::from_bytes(s.as_bytes()))
         } else {
             Err("invalid language")
         }
@@ -225,38 +247,37 @@ impl Script {
     }
 
     /// Converts an ISO 15924 script tag to a corresponding `Script`.
-    pub fn from_iso15924_tag(tag: Tag) -> Option<Script> {
-        if tag.is_null() {
+    pub const fn from_iso15924_tag(tag: Tag) -> Option<Script> {
+        let tag = u32::from_be_bytes(tag.to_be_bytes());
+
+        if tag == 0 {
             return None;
         }
 
         // Be lenient, adjust case (one capital letter followed by three small letters).
-        let tag = Tag::from_u32((tag.as_u32() & 0xDFDFDFDF) | 0x00202020);
+        let tag = (tag & 0xDFDF_DFDF) | 0x0020_2020;
 
-        match &tag.to_be_bytes() {
+        if tag & 0xE0E0_E0E0 != 0x4060_6060 {
+            return Some(script::UNKNOWN);
+        }
+
+        Some(match &tag.to_be_bytes() {
             // These graduated from the 'Q' private-area codes, but
             // the old code is still aliased by Unicode, and the Qaai
             // one in use by ICU.
-            b"Qaai" => return Some(script::INHERITED),
-            b"Qaac" => return Some(script::COPTIC),
+            b"Qaai" => script::INHERITED,
+            b"Qaac" => script::COPTIC,
 
             // Script variants from https://unicode.org/iso15924/
-            b"Aran" => return Some(script::ARABIC),
-            b"Cyrs" => return Some(script::CYRILLIC),
-            b"Geok" => return Some(script::GEORGIAN),
-            b"Hans" | b"Hant" => return Some(script::HAN),
-            b"Jamo" => return Some(script::HANGUL),
-            b"Latf" | b"Latg" => return Some(script::LATIN),
-            b"Syre" | b"Syrj" | b"Syrn" => return Some(script::SYRIAC),
-
-            _ => {}
-        }
-
-        if tag.as_u32() & 0xE0E0E0E0 == 0x40606060 {
-            Some(Script(tag))
-        } else {
-            Some(script::UNKNOWN)
-        }
+            b"Aran" => script::ARABIC,
+            b"Cyrs" => script::CYRILLIC,
+            b"Geok" => script::GEORGIAN,
+            b"Hans" | b"Hant" => script::HAN,
+            b"Jamo" => script::HANGUL,
+            b"Latf" | b"Latg" => script::LATIN,
+            b"Syre" | b"Syrj" | b"Syrn" => script::SYRIAC,
+            &t => Script(Tag::from_be_bytes(t)),
+        })
     }
 
     /// Returns script's tag.
@@ -266,7 +287,7 @@ impl Script {
     }
 }
 
-impl core::str::FromStr for Script {
+impl FromStr for Script {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
@@ -474,6 +495,11 @@ pub mod script {
     pub const SUNUWAR: Script = Script::from_bytes(b"Sunu");
     pub const TODHRI: Script = Script::from_bytes(b"Todr");
     pub const TULU_TIGALARI: Script = Script::from_bytes(b"Tutg");
+    // Since 17.0
+    pub const BERIA_ERFE: Script = Script::from_bytes(b"Berf");
+    pub const SIDETIC: Script = Script::from_bytes(b"Sidt");
+    pub const TAI_YO: Script = Script::from_bytes(b"Tayo");
+    pub const TOLONG_SIKI: Script = Script::from_bytes(b"Tols");
 
     pub const MATH: Script = Script::from_bytes(b"Zmth");
 
@@ -521,7 +547,7 @@ impl Feature {
     }
 }
 
-impl core::str::FromStr for Feature {
+impl FromStr for Feature {
     type Err = &'static str;
 
     /// Parses a `Feature` form a string.
@@ -679,7 +705,7 @@ pub struct Variation {
     pub value: f32,
 }
 
-impl core::str::FromStr for Variation {
+impl FromStr for Variation {
     type Err = &'static str;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {

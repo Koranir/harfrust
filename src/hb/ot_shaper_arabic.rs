@@ -3,22 +3,21 @@ use alloc::boxed::Box;
 
 use super::algs::*;
 use super::buffer::*;
-use super::ot_layout::*;
 use super::ot_map::*;
 use super::ot_shape::*;
 use super::ot_shape_normalize::HB_OT_SHAPE_NORMALIZATION_MODE_AUTO;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::ot_shaper::*;
 use super::unicode::*;
-use super::{hb_font_t, hb_glyph_info_t, hb_mask_t, hb_tag_t, script, Script};
+use super::{hb_font_t, hb_mask_t, hb_tag_t, script, GlyphInfo, Script};
 
 const HB_BUFFER_SCRATCH_FLAG_ARABIC_HAS_STCH: hb_buffer_scratch_flags_t =
     HB_BUFFER_SCRATCH_FLAG_SHAPER0;
 
 // See:
 // https://github.com/harfbuzz/harfbuzz/commit/6e6f82b6f3dde0fc6c3c7d991d9ec6cfff57823d#commitcomment-14248516
-fn is_word_category(gc: hb_unicode_general_category_t) -> bool {
-    (rb_flag_unsafe(gc.to_u32())
+fn is_word_category(gc: GeneralCategory) -> bool {
+    (rb_flag_unsafe(gc.to_u8() as u32)
         & (rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_UNASSIGNED)
             | rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_PRIVATE_USE)
             | rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_MODIFIER_LETTER)
@@ -49,13 +48,13 @@ pub enum hb_arabic_joining_type_t {
     X = 8, // means: use general-category to choose between U or T.
 }
 
-fn get_joining_type(u: char, gc: hb_unicode_general_category_t) -> hb_arabic_joining_type_t {
+fn get_joining_type(u: Codepoint, gc: GeneralCategory) -> hb_arabic_joining_type_t {
     let j_type = super::ot_shaper_arabic_table::joining_type(u);
     if j_type != hb_arabic_joining_type_t::X {
         return j_type;
     }
 
-    let ok = rb_flag_unsafe(gc.to_u32())
+    let ok = rb_flag_unsafe(gc.to_u8() as u32)
         & (rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_NON_SPACING_MARK)
             | rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_ENCLOSING_MARK)
             | rb_flag(hb_gc::HB_UNICODE_GENERAL_CATEGORY_FORMAT));
@@ -101,7 +100,7 @@ mod arabic_action_t {
     }
 }
 
-const STATE_TABLE: &[[(u8, u8, u16); 6]] = &[
+static STATE_TABLE: &[[(u8, u8, u16); 6]] = &[
     // jt_U,          jt_L,          jt_R,
     // jt_D,          jg_ALAPH,      jg_DALATH_RISH
 
@@ -170,14 +169,20 @@ const STATE_TABLE: &[[(u8, u8, u16); 6]] = &[
     ],
 ];
 
-impl hb_glyph_info_t {
-    fn arabic_shaping_action(&self) -> u8 {
-        self.ot_shaper_var_u8_auxiliary()
-    }
+impl GlyphInfo {
+    declare_buffer_var_alias!(
+        OT_SHAPER_VAR_U8_AUXILIARY_VAR,
+        u8,
+        ARABIC_SHAPING_ACTION_VAR,
+        arabic_shaping_action,
+        set_arabic_shaping_action
+    );
+}
 
-    fn set_arabic_shaping_action(&mut self, action: u8) {
-        self.set_ot_shaper_var_u8_auxiliary(action)
-    }
+fn deallocate_buffer_var(_: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) -> bool {
+    buffer.deallocate_var(GlyphInfo::ARABIC_SHAPING_ACTION_VAR);
+
+    false
 }
 
 fn collect_features(planner: &mut hb_ot_shape_planner_t) {
@@ -224,6 +229,7 @@ fn collect_features(planner: &mut hb_ot_shape_planner_t) {
             .add_feature(*feature, F_MANUAL_ZWJ | flags, 1);
         planner.ot_map.add_gsub_pause(None);
     }
+    planner.ot_map.add_gsub_pause(Some(deallocate_buffer_var));
 
     // Normally, Unicode says a ZWNJ means "don't ligate".  In Arabic script
     // however, it says a ZWJ should also mean "don't ligate".  So we run
@@ -298,7 +304,7 @@ fn arabic_joining(buffer: &mut hb_buffer_t) {
 
     // Check pre-context.
     for i in 0..buffer.context_len[0] {
-        let c = buffer.context[0][i];
+        let c = buffer.context[0][i] as Codepoint;
         let this_type = get_joining_type(c, c.general_category());
         if this_type == hb_arabic_joining_type_t::T {
             continue;
@@ -310,8 +316,8 @@ fn arabic_joining(buffer: &mut hb_buffer_t) {
 
     for i in 0..buffer.len {
         let this_type = get_joining_type(
-            buffer.info[i].as_char(),
-            _hb_glyph_info_get_general_category(&buffer.info[i]),
+            buffer.info[i].as_codepoint(),
+            buffer.info[i].general_category(),
         );
         if this_type == hb_arabic_joining_type_t::T {
             buffer.info[i].set_arabic_shaping_action(arabic_action_t::NONE);
@@ -345,7 +351,7 @@ fn arabic_joining(buffer: &mut hb_buffer_t) {
     }
 
     for i in 0..buffer.context_len[1] {
-        let c = buffer.context[1][i];
+        let c = buffer.context[1][i] as Codepoint;
         let this_type = get_joining_type(c, c.general_category());
         if this_type == hb_arabic_joining_type_t::T {
             continue;
@@ -382,8 +388,10 @@ fn mongolian_variation_selectors(buffer: &mut hb_buffer_t) {
 }
 
 fn setup_masks_arabic_plan(plan: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) {
+    buffer.allocate_var(GlyphInfo::ARABIC_SHAPING_ACTION_VAR);
+
     let arabic_plan = plan.data::<arabic_shape_plan_t>();
-    setup_masks_inner(arabic_plan, plan.script, buffer)
+    setup_masks_inner(arabic_plan, plan.script, buffer);
 }
 
 pub fn setup_masks_inner(
@@ -425,8 +433,8 @@ fn record_stch(plan: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_
     let info = &mut buffer.info;
     let mut has_stch = false;
     for glyph_info in &mut info[..len] {
-        if _hb_glyph_info_multiplied(glyph_info) {
-            let comp = if _hb_glyph_info_get_lig_comp(glyph_info) % 2 != 0 {
+        if glyph_info.multiplied() {
+            let comp = if glyph_info.lig_comp() % 2 != 0 {
                 arabic_action_t::STRETCHING_REPEATING
             } else {
                 arabic_action_t::STRETCHING_FIXED
@@ -504,10 +512,8 @@ fn apply_stch(face: &hb_font_t, buffer: &mut hb_buffer_t) {
             let mut context = i;
             while context != 0
                 && !arabic_action_t::is_stch(buffer.info[context - 1].arabic_shaping_action())
-                && (_hb_glyph_info_is_default_ignorable(&buffer.info[context - 1])
-                    || is_word_category(_hb_glyph_info_get_general_category(
-                        &buffer.info[context - 1],
-                    )))
+                && (buffer.info[context - 1].is_default_ignorable()
+                    || is_word_category(buffer.info[context - 1].general_category()))
             {
                 context -= 1;
                 w_total += buffer.pos[context].x_advance;
@@ -597,11 +603,11 @@ fn apply_stch(face: &hb_font_t, buffer: &mut hb_buffer_t) {
 }
 
 fn postprocess_glyphs_arabic(_: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buffer_t) {
-    apply_stch(face, buffer)
+    apply_stch(face, buffer);
 }
 
 // http://www.unicode.org/reports/tr53/
-const MODIFIER_COMBINING_MARKS: &[u32] = &[
+static MODIFIER_COMBINING_MARKS: &[u32] = &[
     0x0654, // ARABIC HAMZA ABOVE
     0x0655, // ARABIC HAMZA BELOW
     0x0658, // ARABIC MARK NOON GHUNNA
@@ -626,7 +632,7 @@ fn reorder_marks_arabic(
 ) {
     let mut i = start;
     for cc in [220u8, 230] {
-        while i < end && _hb_glyph_info_get_modified_combining_class(&buffer.info[i]) < cc {
+        while i < end && buffer.info[i].modified_combining_class() < cc {
             i += 1;
         }
 
@@ -634,13 +640,13 @@ fn reorder_marks_arabic(
             break;
         }
 
-        if _hb_glyph_info_get_modified_combining_class(&buffer.info[i]) > cc {
+        if buffer.info[i].modified_combining_class() > cc {
             continue;
         }
 
         let mut j = i;
         while j < end
-            && _hb_glyph_info_get_modified_combining_class(&buffer.info[j]) == cc
+            && buffer.info[j].modified_combining_class() == cc
             && MODIFIER_COMBINING_MARKS.contains(&buffer.info[j].glyph_id)
         {
             j += 1;
@@ -651,7 +657,7 @@ fn reorder_marks_arabic(
         }
 
         // Shift it!
-        let mut temp = [hb_glyph_info_t::default(); MAX_COMBINING_MARKS];
+        let mut temp = [GlyphInfo::default(); MAX_COMBINING_MARKS];
         debug_assert!(j - i <= MAX_COMBINING_MARKS);
         buffer.merge_clusters(start, j);
 
@@ -682,7 +688,7 @@ fn reorder_marks_arabic(
         };
 
         while start < new_start {
-            _hb_glyph_info_set_modified_combining_class(&mut buffer.info[start], new_cc);
+            buffer.info[start].set_modified_combining_class(new_cc);
             start += 1;
         }
 

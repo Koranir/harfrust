@@ -1,8 +1,13 @@
+use super::buffer::GlyphPropsFlags;
 use super::ot_layout::TableIndex;
 use super::{common::TagExt, set_digest::hb_set_digest_t};
 use crate::hb::hb_tag_t;
+use crate::hb::ot_layout_gsubgpos::MappingCache;
+use crate::hb::tables::TableRanges;
 use alloc::vec::Vec;
-use lookup::{LookupCache, LookupInfo, SubtableCache};
+use lookup::{LookupCache, LookupInfo};
+use read_fonts::tables::layout::{ClassRangeRecord, RangeRecord};
+use read_fonts::types::GlyphId16;
 use read_fonts::{
     tables::{
         gdef::Gdef,
@@ -24,6 +29,7 @@ pub mod lookup;
 pub struct OtCache {
     pub gsub: LookupCache,
     pub gpos: LookupCache,
+    pub gdef_glyph_props_cache: MappingCache,
     pub gdef_mark_set_digests: Vec<hb_set_digest_t>,
 }
 
@@ -31,19 +37,11 @@ impl OtCache {
     pub fn new(font: &FontRef) -> Self {
         let gsub = font
             .gsub()
-            .map(|t| {
-                let mut cache = LookupCache::new();
-                cache.create_all(&t);
-                cache
-            })
+            .map(|t| LookupCache::new(&t))
             .unwrap_or_default();
         let gpos = font
             .gpos()
-            .map(|t| {
-                let mut cache = LookupCache::new();
-                cache.create_all(&t);
-                cache
-            })
+            .map(|t| LookupCache::new(&t))
             .unwrap_or_default();
         let mut gdef_mark_set_digests = Vec::new();
         if let Ok(gdef) = font.gdef() {
@@ -58,6 +56,7 @@ impl OtCache {
         Self {
             gsub,
             gpos,
+            gdef_glyph_props_cache: MappingCache::new(),
             gdef_mark_set_digests,
         }
     }
@@ -74,8 +73,7 @@ impl crate::hb::ot_layout::LayoutTable for GsubTable<'_> {
     const IN_PLACE: bool = false;
 
     fn get_lookup(&self, index: u16) -> Option<&LookupInfo> {
-        let lookup = self.lookups.get(index)?;
-        (lookup.subtables_count > 0).then_some(lookup)
+        self.lookups.get(&self.table, index)
     }
 }
 
@@ -90,8 +88,7 @@ impl crate::hb::ot_layout::LayoutTable for GposTable<'_> {
     const IN_PLACE: bool = true;
 
     fn get_lookup(&self, index: u16) -> Option<&LookupInfo> {
-        let lookup = self.lookups.get(index)?;
-        (lookup.subtables_count > 0).then_some(lookup)
+        self.lookups.get(&self.table, index)
     }
 }
 
@@ -104,8 +101,8 @@ pub struct GdefTable<'a> {
 }
 
 impl<'a> GdefTable<'a> {
-    fn new(font: &FontRef<'a>) -> Self {
-        if let Ok(gdef) = font.gdef() {
+    fn new(font: &FontRef<'a>, table_ranges: &TableRanges) -> Self {
+        if let Some(gdef) = table_ranges.gdef.resolve_table::<Gdef>(font) {
             let classes = gdef.glyph_class_def().transpose().ok().flatten();
             let mark_classes = gdef.mark_attach_class_def().transpose().ok().flatten();
             let mark_sets = gdef
@@ -131,27 +128,41 @@ pub struct OtTables<'a> {
     pub gsub: Option<GsubTable<'a>>,
     pub gpos: Option<GposTable<'a>>,
     pub gdef: GdefTable<'a>,
+    pub gdef_glyph_props_cache: &'a MappingCache,
     pub gdef_mark_set_digests: &'a [hb_set_digest_t],
     pub coords: &'a [F2Dot14],
     pub var_store: Option<ItemVariationStore<'a>>,
+    pub feature_variations: [Option<u32>; 2],
 }
 
 impl<'a> OtTables<'a> {
-    pub fn new(font: &FontRef<'a>, cache: &'a OtCache, coords: &'a [F2Dot14]) -> Self {
-        let gsub = font.gsub().ok().map(|table| GsubTable {
-            table,
-            lookups: &cache.gsub,
-        });
-        let gpos = font.gpos().ok().map(|table| GposTable {
-            table,
-            lookups: &cache.gpos,
-        });
+    pub fn new(
+        font: &FontRef<'a>,
+        cache: &'a OtCache,
+        table_offsets: &TableRanges,
+        coords: &'a [F2Dot14],
+        feature_variations: [Option<u32>; 2],
+    ) -> Self {
+        let gsub = table_offsets
+            .gsub
+            .resolve_table(font)
+            .map(|table| GsubTable {
+                table,
+                lookups: &cache.gsub,
+            });
+        let gpos = table_offsets
+            .gpos
+            .resolve_table(font)
+            .map(|table| GposTable {
+                table,
+                lookups: &cache.gpos,
+            });
         let coords = if coords.iter().any(|coord| *coord != F2Dot14::ZERO) {
             coords
         } else {
             &[]
         };
-        let gdef = GdefTable::new(font);
+        let gdef = GdefTable::new(font, table_offsets);
         let var_store = if !coords.is_empty() {
             gdef.table
                 .as_ref()
@@ -163,9 +174,11 @@ impl<'a> OtTables<'a> {
             gsub,
             gpos,
             gdef,
+            gdef_glyph_props_cache: &cache.gdef_glyph_props_cache,
             gdef_mark_set_digests: &cache.gdef_mark_set_digests,
             var_store,
             coords,
+            feature_variations,
         }
     }
 
@@ -177,67 +190,81 @@ impl<'a> OtTables<'a> {
         self.gdef
             .classes
             .as_ref()
-            .map(|class_def| class_def.get((glyph_id as u16).into()))
-            .unwrap_or(0)
+            .map_or(0, |class_def| class_def.get(glyph_id))
     }
 
     pub fn glyph_mark_attachment_class(&self, glyph_id: u32) -> u16 {
         self.gdef
             .mark_classes
             .as_ref()
-            .map(|class_def| class_def.get((glyph_id as u16).into()))
-            .unwrap_or(0)
+            .map_or(0, |class_def| class_def.get(glyph_id))
+    }
+
+    pub(crate) fn glyph_props(&self, glyph: GlyphId) -> u16 {
+        let glyph = glyph.to_u32();
+
+        if let Some(props) = self.gdef_glyph_props_cache.get(glyph) {
+            return props as u16;
+        }
+
+        let props = match self.glyph_class(glyph) {
+            1 => GlyphPropsFlags::BASE_GLYPH.bits(),
+            2 => GlyphPropsFlags::LIGATURE.bits(),
+            3 => {
+                let class = self.glyph_mark_attachment_class(glyph);
+                (class << 8) | GlyphPropsFlags::MARK.bits()
+            }
+            _ => 0,
+        };
+
+        self.gdef_glyph_props_cache.set(glyph, props as u32);
+
+        props
     }
 
     pub fn is_mark_glyph(&self, glyph_id: u32, set_index: u16) -> bool {
         if self
             .gdef_mark_set_digests
             .get(set_index as usize)
-            .map(|digest| digest.may_have_glyph(glyph_id.into()))
-            .unwrap_or(false)
+            .is_some_and(|digest| digest.may_have(glyph_id))
         {
             self.gdef
                 .mark_sets
                 .as_ref()
                 .and_then(|(data, offsets)| Some((data, offsets.get(set_index as usize)?.get())))
                 .and_then(|(data, offset)| offset.resolve::<CoverageTable>(*data).ok())
-                .map(|coverage| coverage.get(glyph_id).is_some())
-                .unwrap_or(false)
+                .is_some_and(|coverage| coverage.get(glyph_id).is_some())
         } else {
             false
         }
     }
 
-    pub fn table_data_and_lookups(
-        &self,
-        table_index: TableIndex,
-    ) -> Option<(&'a [u8], &'a LookupCache)> {
+    pub fn table_data(&self, table_index: TableIndex) -> Option<&'a [u8]> {
         if table_index == TableIndex::GSUB {
-            let table = self.gsub.as_ref()?;
-            Some((table.table.offset_data().as_bytes(), table.lookups))
+            self.gsub.as_ref().map(|t| t.table.offset_data().as_bytes())
         } else {
-            let table = self.gpos.as_ref()?;
-            Some((table.table.offset_data().as_bytes(), table.lookups))
+            self.gpos.as_ref().map(|t| t.table.offset_data().as_bytes())
         }
     }
 
-    pub fn subtable_cache(
-        &self,
-        table_index: TableIndex,
-        lookup: LookupInfo,
-    ) -> Option<SubtableCache<'a>> {
-        let (table_data, lookups) = self.table_data_and_lookups(table_index)?;
-        Some(SubtableCache::new(table_data, lookups, lookup))
-    }
-
-    pub fn subtable_cache_for_index(
+    pub fn table_data_and_lookup(
         &self,
         table_index: TableIndex,
         lookup_index: u16,
-    ) -> Option<SubtableCache<'a>> {
-        let (table_data, lookups) = self.table_data_and_lookups(table_index)?;
-        let lookup = lookups.get(lookup_index)?;
-        Some(SubtableCache::new(table_data, lookups, lookup.clone()))
+    ) -> Option<(&'a [u8], &'a LookupInfo)> {
+        if table_index == TableIndex::GSUB {
+            let table = self.gsub.as_ref()?;
+            Some((
+                table.table.offset_data().as_bytes(),
+                table.lookups.get(&table.table, lookup_index)?,
+            ))
+        } else {
+            let table = self.gpos.as_ref()?;
+            Some((
+                table.table.offset_data().as_bytes(),
+                table.lookups.get(&table.table, lookup_index)?,
+            ))
+        }
     }
 
     pub(super) fn resolve_anchor(&self, anchor: &AnchorTable) -> (i32, i32) {
@@ -350,7 +377,7 @@ impl<'a> LayoutTable<'a> {
                 .conditions()
                 .iter()
                 // .. except we ignore errors
-                .filter_map(|cond| cond.ok())
+                .filter_map(Result::ok)
                 .all(|cond| match cond {
                     Condition::Format1AxisRange(format1) => {
                         let coord = coords
@@ -481,15 +508,191 @@ fn coverage_index(coverage: Result<CoverageTable, ReadError>, gid: GlyphId) -> O
     coverage.ok().and_then(|coverage| coverage.get(gid))
 }
 
+fn coverage_index_cached(
+    coverage: impl Fn(GlyphId) -> Option<u16>,
+    gid: GlyphId,
+    cache: &MappingCache,
+) -> Option<u16> {
+    if let Some(index) = cache.get(gid.into()) {
+        if index == MappingCache::MAX_VALUE {
+            None
+        } else {
+            Some(index as u16)
+        }
+    } else {
+        let index = coverage(gid);
+        if let Some(index) = index {
+            if (index as u32) < MappingCache::MAX_VALUE {
+                cache.set_unchecked(gid.into(), index as u32);
+            }
+            Some(index)
+        } else {
+            cache.set_unchecked(gid.into(), MappingCache::MAX_VALUE);
+            None
+        }
+    }
+}
+
 fn covered(coverage: Result<CoverageTable, ReadError>, gid: GlyphId) -> bool {
     coverage_index(coverage, gid).is_some()
 }
 
 fn glyph_class(class_def: Result<ClassDef, ReadError>, gid: GlyphId) -> u16 {
-    let Ok(gid16) = gid.try_into() else {
-        return 0;
-    };
     class_def
-        .map(|class_def| class_def.get(gid16))
+        .map(|class_def| class_def.get(gid))
         .unwrap_or_default()
+}
+
+fn glyph_class_cached(
+    class_def: impl Fn(GlyphId) -> u16,
+    gid: GlyphId,
+    cache: &MappingCache,
+) -> u16 {
+    if let Some(index) = cache.get(gid.into()) {
+        index as u16
+    } else {
+        let index = class_def(gid);
+        cache.set(gid.into(), index as u32);
+        index
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub(crate) struct CoverageInfo {
+    pub offset: u16,
+    pub format: u16,
+    pub count: u16,
+}
+
+impl CoverageInfo {
+    pub fn new(parent_data: &FontData, offset: u16) -> Option<Self> {
+        if offset == 0 {
+            return None;
+        }
+        let format = parent_data.read_at::<u16>(offset as usize).ok()?;
+        if format != 1 && format != 2 {
+            return None;
+        }
+        let count = parent_data.read_at::<u16>(offset as usize + 2).ok()?;
+        Some(Self {
+            offset,
+            format,
+            count,
+        })
+    }
+
+    pub fn index(&self, parent_data: &FontData, gid: GlyphId) -> Option<u16> {
+        if self.offset == 0 {
+            return None;
+        }
+        let gid = gid.to_u32();
+        let data_offset = self.offset as usize + 4;
+        let len = self.count as usize;
+        if self.format == 1 {
+            let glyphs = parent_data
+                .read_array::<BigEndian<GlyphId16>>(data_offset..data_offset + len * 2)
+                .ok()?;
+            glyphs
+                .binary_search_by_key(&gid, |g| g.get().to_u32())
+                .ok()
+                .map(|idx| idx as _)
+        } else {
+            use core::cmp::Ordering;
+            let records = parent_data
+                .read_array::<RangeRecord>(
+                    data_offset..data_offset + len * size_of::<RangeRecord>(),
+                )
+                .ok()?;
+            records
+                .binary_search_by(|rec| {
+                    if rec.end_glyph_id().to_u32() < gid {
+                        Ordering::Less
+                    } else if rec.start_glyph_id().to_u32() > gid {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Equal
+                    }
+                })
+                .ok()
+                .map(|idx| {
+                    let rec = &records[idx];
+                    (rec.start_coverage_index() as u32 + gid - rec.start_glyph_id().to_u32()) as u16
+                })
+        }
+    }
+}
+
+#[derive(Copy, Clone, Default, Debug)]
+pub(crate) struct ClassDefInfo {
+    pub offset: u16,
+    pub format: u16,
+    // For format 1 only
+    pub start_glyph_id: u16,
+    pub count: u16,
+}
+
+impl ClassDefInfo {
+    pub fn new(parent_data: &FontData, offset: u16) -> Option<Self> {
+        if offset == 0 {
+            return None;
+        }
+        let format = parent_data.read_at::<u16>(offset as usize).ok()?;
+        if format != 1 && format != 2 {
+            return None;
+        }
+        let (start_glyph_id, count) = if format == 1 {
+            let start_glyph_id = parent_data.read_at::<u16>(offset as usize + 2).ok()?;
+            let count = parent_data.read_at::<u16>(offset as usize + 4).ok()?;
+            (start_glyph_id, count)
+        } else if format == 2 {
+            let count = parent_data.read_at::<u16>(offset as usize + 2).ok()?;
+            (0, count)
+        } else {
+            return None;
+        };
+        Some(Self {
+            offset,
+            format,
+            start_glyph_id,
+            count,
+        })
+    }
+
+    pub fn class(&self, parent_data: &FontData, gid: GlyphId) -> u16 {
+        let offset = self.offset as usize;
+        if offset == 0 {
+            return 0;
+        }
+        let gid = gid.to_u32();
+        if self.format == 1 {
+            let Some(idx) = gid.checked_sub(self.start_glyph_id as u32) else {
+                return 0;
+            };
+            if idx >= self.count as u32 {
+                return 0;
+            }
+            parent_data
+                .read_at::<u16>(offset + 6 + idx as usize * 2)
+                .unwrap_or(0)
+        } else {
+            use core::cmp::Ordering;
+            let start = offset + 4;
+            let end = start + self.count as usize * size_of::<ClassRangeRecord>();
+            let Ok(records) = parent_data.read_array::<ClassRangeRecord>(start..end) else {
+                return 0;
+            };
+            records
+                .binary_search_by(|rec| {
+                    if rec.end_glyph_id().to_u32() < gid {
+                        Ordering::Less
+                    } else if rec.start_glyph_id().to_u32() > gid {
+                        Ordering::Greater
+                    } else {
+                        Ordering::Equal
+                    }
+                })
+                .ok()
+                .map_or(0, |idx| records[idx].class())
+        }
+    }
 }

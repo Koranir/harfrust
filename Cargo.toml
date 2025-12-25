@@ -1,11 +1,9 @@
 [package]
 name = "harfrust"
-version = "0.1.0"
+version = "0.4.1"
 edition = "2021"
-rust-version = "1.75"  # should match https://github.com/googlefonts/fontations/blob/main/Cargo.toml
+rust-version = "1.82"  # should match https://github.com/googlefonts/fontations/blob/main/Cargo.toml
 description = "A complete HarfBuzz shaping algorithm port to Rust."
-documentation = "https://docs.rs/harfrust/"
-readme = "README.md"
 repository = "https://github.com/harfbuzz/harfrust"
 license = "MIT"
 keywords = ["text", "shaping", "opentype", "truetype"]
@@ -16,24 +14,44 @@ exclude = ["benches/", "tests/"]
 bitflags = "2.9"
 bytemuck = { version = "1.22", features = ["extern_crate_alloc"] }
 core_maths = "0.1" # only for no_std builds
+read-fonts = { version = "0.36.0", default-features = false, features = ["libm"] }
+# read-fonts = { git = "https://github.com/googlefonts/fontations", default-features = false, features = ["libm"] }
 smallvec = "1.14"
-read-fonts = { version = "0.30.1", default-features = false, features = ["libm"] }
 
 [features]
 default = ["std"]
 std = ["read-fonts/std"]
 
 [dev-dependencies]
-pico-args = { version = "0.5", features = ["eq-separator"] }
+criterion = "0.8.0"
+harfbuzz_rs = { git = "https://github.com/harfbuzz/harfbuzz_rs/", rev = "66dae27" }
 libc = "0.2"
+pico-args = { version = "0.5", features = ["eq-separator"] }
+
+[lib]
+bench = false
+
+[[bench]]
+name = "shaping"
+harness = false
+
+[profile.release]
+strip = true
+lto = "fat"
+overflow-checks = false
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
 
 [lints.rust]
-# TODO: enable this and fix related code
-unused_qualifications = "allow"
+unused_qualifications = "warn"
 
 [lints.clippy]
 cargo = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
+# Reviewed Lints
+redundant_closure_for_method_calls = "allow"  # use for Result and Into, allow the rest
 # These are the currently triggering clippy lints, which should be fixed in the subsequent PRs.
 # This list was generated with this command:
 #  cargo clippy --all-targets --workspace --all-features --message-format=json --quiet | jq -r '.message.code.code | select(. != null and startswith("clippy::"))' | sort | uniq -c | sort -h -r
@@ -43,17 +61,12 @@ cast_lossless = "allow"  # 274
 cast_sign_loss = "allow"  # 192
 used_underscore_binding = "allow"  # 160
 cast_possible_truncation = "allow"  # 160
-unreadable_literal = "allow"  # 116
 wildcard_imports = "allow"  # 72
 cast_possible_wrap = "allow"  # 66
-semicolon_if_nothing_returned = "allow"  # 64
 must_use_candidate = "allow"  # 62
-map_unwrap_or = "allow"  # 36
 if_not_else = "allow"  # 29
-redundant_closure_for_method_calls = "allow"  # 27
 too_many_lines = "allow"  # 26
 doc_markdown = "allow"  # 26
-manual_is_variant_and = "allow"  # 24
 struct_excessive_bools = "allow"  # 14
 many_single_char_names = "allow"  # 14
 mut_mut = "allow"  # 10
@@ -62,7 +75,6 @@ items_after_statements = "allow"  # 8
 unnested_or_patterns = "allow"  # 6
 unnecessary_wraps = "allow"  # 6
 unnecessary_semicolon = "allow"  # 6
-uninlined_format_args = "allow"  # 5
 trivially_copy_pass_by_ref = "allow"  # 4
 return_self_not_must_use = "allow"  # 4
 redundant_else = "allow"  # 4

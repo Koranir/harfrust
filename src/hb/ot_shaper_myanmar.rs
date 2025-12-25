@@ -1,11 +1,12 @@
-use super::buffer::hb_buffer_t;
+use super::buffer::*;
 use super::ot_map::*;
 use super::ot_shape::*;
 use super::ot_shape_normalize::*;
 use super::ot_shape_plan::hb_ot_shape_plan_t;
 use super::ot_shaper::*;
 use super::ot_shaper_indic::{ot_category_t, ot_position_t};
-use super::{hb_font_t, hb_glyph_info_t, hb_tag_t};
+use super::ot_shaper_syllabic::*;
+use super::{hb_font_t, hb_tag_t, GlyphInfo};
 use crate::hb::ot_shaper_indic::ot_category_t::OT_VPre;
 
 pub const MYANMAR_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
@@ -23,6 +24,23 @@ pub const MYANMAR_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
     zero_width_marks: HB_OT_SHAPE_ZERO_WIDTH_MARKS_BY_GDEF_EARLY,
     fallback_position: false,
 };
+
+impl GlyphInfo {
+    declare_buffer_var_alias!(
+        OT_SHAPER_VAR_U8_CATEGORY_VAR,
+        u8,
+        MYANMAR_CATEGORY_VAR,
+        myanmar_category,
+        set_myanmar_category
+    );
+    declare_buffer_var_alias!(
+        OT_SHAPER_VAR_U8_AUXILIARY_VAR,
+        u8,
+        MYANMAR_POSITION_VAR,
+        myanmar_position,
+        set_myanmar_position
+    );
+}
 
 // Ugly Zawgyi encoding.
 // Disable all auto processing.
@@ -43,7 +61,7 @@ pub const MYANMAR_ZAWGYI_SHAPER: hb_ot_shaper_t = hb_ot_shaper_t {
     fallback_position: false,
 };
 
-const MYANMAR_FEATURES: &[hb_tag_t] = &[
+static MYANMAR_FEATURES: &[hb_tag_t] = &[
     // Basic features.
     // These features are applied in order, one at a time, after reordering,
     // constrained to the syllable.
@@ -59,7 +77,7 @@ const MYANMAR_FEATURES: &[hb_tag_t] = &[
     hb_tag_t::new(b"psts"),
 ];
 
-impl hb_glyph_info_t {
+impl GlyphInfo {
     fn set_myanmar_properties(&mut self) {
         let u = self.glyph_id;
         let (cat, _) = crate::hb::ot_shaper_indic_table::get_categories(u);
@@ -98,6 +116,8 @@ fn collect_features(planner: &mut hb_ot_shape_planner_t) {
 }
 
 fn setup_syllables(_: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) -> bool {
+    buffer.allocate_var(GlyphInfo::SYLLABLE_VAR);
+
     super::ot_shaper_myanmar_machine::find_syllables_myanmar(buffer);
 
     let mut start = 0;
@@ -116,7 +136,7 @@ fn reorder_myanmar(_: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buf
 
     let mut ret = false;
 
-    if super::ot_shaper_syllabic::insert_dotted_circles(
+    if insert_dotted_circles(
         face,
         buffer,
         SyllableType::BrokenCluster as u8,
@@ -134,6 +154,9 @@ fn reorder_myanmar(_: &hb_ot_shape_plan_t, face: &hb_font_t, buffer: &mut hb_buf
         start = end;
         end = buffer.next_syllable(start);
     }
+
+    buffer.deallocate_var(GlyphInfo::MYANMAR_CATEGORY_VAR);
+    buffer.deallocate_var(GlyphInfo::MYANMAR_POSITION_VAR);
 
     ret
 }
@@ -290,7 +313,7 @@ fn initial_reordering_consonant_syllable(start: usize, end: usize, buffer: &mut 
         let mut i = first_left_matra;
 
         for j in i..=last_left_matra {
-            if buffer.info[j].myanmar_category() == ot_category_t::OT_VPre {
+            if buffer.info[j].myanmar_category() == OT_VPre {
                 buffer.reverse_range(i, j + 1);
                 i = j + 1;
             }
@@ -299,6 +322,9 @@ fn initial_reordering_consonant_syllable(start: usize, end: usize, buffer: &mut 
 }
 
 fn setup_masks(_: &hb_ot_shape_plan_t, _: &hb_font_t, buffer: &mut hb_buffer_t) {
+    buffer.allocate_var(GlyphInfo::MYANMAR_CATEGORY_VAR);
+    buffer.allocate_var(GlyphInfo::MYANMAR_POSITION_VAR);
+
     // No masks, we just save information about characters.
     for info in buffer.info_slice_mut() {
         info.set_myanmar_properties();
