@@ -1,4 +1,3 @@
-use crate::hb::buffer::hb_buffer_t;
 use crate::{hb::tables::TableRanges, Tag};
 use read_fonts::{
     tables::{

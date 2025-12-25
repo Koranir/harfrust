@@ -10,7 +10,6 @@ use super::ot::{LayoutTable, OtCache, OtTables};
 use super::ot_layout::TableIndex;
 use super::ot_shape::{hb_ot_shape_context_t, shape_internal};
 use crate::hb::aat::AatCache;
-use crate::hb::buffer::hb_buffer_t;
 use crate::hb::tables::TableRanges;
 use crate::{script, Feature, GlyphBuffer, NormalizedCoord, ShapePlan, UnicodeBuffer, Variation};
 
@@ -387,12 +386,19 @@ impl<'a> crate::Shaper<'a> {
     }
 }
 
+/// Glyph extent values, measured in font units.
+///
+/// Note that height is negative, in coordinate systems that grow up.
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct hb_glyph_extents_t {
+    /// Distance from the x-origin to the left extremum of the glyph.
     pub x_bearing: i32,
+    /// Distance from the top extremum of the glyph to the y-origin.
     pub y_bearing: i32,
+    /// Distance from the left extremum of the glyph to the right extremum.
     pub width: i32,
+    /// Distance from the top extremum of the glyph to the bottom extremum.
     pub height: i32,
 }
 
@@ -443,6 +449,7 @@ pub trait FontFuncs {
     /// Retrieve the kerning adjustment value for a glyph pair, for horizontal segments.
     fn glyph_h_kerning(&self, font: &crate::Shaper, glyphs: (GlyphId, GlyphId));
 
+    /// Retrieve the extents for a specified glyph.
     fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents>;
 }
 
@@ -543,9 +550,11 @@ impl FontFuncs for FontFuncStorage<'_> {
     }
 }
 
+/// A default set of font functions.
 #[derive(Clone)]
 pub struct DefaultFontFuncs<'a>(GlyphMetrics<'a>);
 impl<'a> DefaultFontFuncs<'a> {
+    /// Creates a new set of default font functions for the given font and shaper data.
     pub fn new(font: &FontRef<'a>, shaper_data: &ShaperData) -> Self {
         Self(GlyphMetrics::new(font, &shaper_data.table_ranges))
     }
@@ -583,6 +592,7 @@ impl FontFuncs for DefaultFontFuncs<'_> {
     }
 
     fn glyph_h_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32) {
+        _ = (font, glyph);
         (0, 0)
     }
 
@@ -620,6 +630,7 @@ impl FontFuncs for DefaultFontFuncs<'_> {
     }
 
     fn glyph_h_kerning(&self, font: &crate::Shaper, glyphs: (GlyphId, GlyphId)) {
+        _ = (font, glyphs);
         todo!()
     }
 
