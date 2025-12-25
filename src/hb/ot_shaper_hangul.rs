@@ -102,7 +102,7 @@ fn is_hangul_tone(u: u32) -> bool {
 
 fn is_zero_width_char(face: &hb_font_t, c: Codepoint) -> bool {
     if let Some(glyph) = face.get_nominal_glyph(c) {
-        face.glyph_h_advance(glyph) == 0
+        face.font_funcs().glyph_h_advance(face, glyph) == 0
     } else {
         false
     }

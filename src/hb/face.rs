@@ -45,6 +45,7 @@ impl ShaperData {
             font: font.clone(),
             instance: None,
             point_size: None,
+            font_funcs: None,
         }
     }
 }
@@ -181,6 +182,7 @@ impl ShaperInstance {
 pub struct ShaperBuilder<'a> {
     data: &'a ShaperData,
     font: FontRef<'a>,
+    font_funcs: Option<&'a dyn FontFuncs>,
     instance: Option<&'a ShaperInstance>,
     point_size: Option<f32>,
 }
@@ -202,12 +204,22 @@ impl<'a> ShaperBuilder<'a> {
         self
     }
 
+    /// Sets custom font functions for the shaper.
+    ///
+    /// This allows the the glyph scaler's font functions to be used during shaping,
+    /// ensuring that both the renderer and shaper use the same metrics. This is useful when
+    /// the scaler applies hinting or other adjustments that affect glyph metrics that would
+    /// otherwise cause shaped positions to become out of sync.
+    pub fn font_funcs(mut self, funcs: &'a dyn FontFuncs) -> Self {
+        self.font_funcs = Some(funcs);
+        self
+    }
+
     /// Builds the shaper with the current configuration.
     pub fn build(self) -> crate::Shaper<'a> {
         let font = self.font;
         let units_per_em = self.data.table_ranges.units_per_em;
         let charmap = Charmap::new(&font, &self.data.table_ranges, &self.data.cmap_cache);
-        let glyph_metrics = GlyphMetrics::new(&font, &self.data.table_ranges);
         let (coords, feature_variations) = self
             .instance
             .map(|instance| (instance.coords(), instance.feature_variations))
@@ -221,13 +233,21 @@ impl<'a> ShaperBuilder<'a> {
         );
         let aat_tables = AatTables::new(&font, &self.data.aat_cache, &self.data.table_ranges);
         hb_font_t {
-            font,
             units_per_em,
             points_per_em: self.point_size,
             charmap,
-            glyph_metrics,
             ot_tables,
             aat_tables,
+            font_funcs: self.font_funcs.map_or_else(
+                || {
+                    FontFuncStorage::Default(DefaultFontFuncs(GlyphMetrics::new(
+                        &font,
+                        &self.data.table_ranges,
+                    )))
+                },
+                |f| FontFuncStorage::Custom(f),
+            ),
+            font,
         }
     }
 }
@@ -239,9 +259,9 @@ pub struct hb_font_t<'a> {
     pub(crate) units_per_em: u16,
     pub(crate) points_per_em: Option<f32>,
     charmap: Charmap<'a>,
-    glyph_metrics: GlyphMetrics<'a>,
     pub(crate) ot_tables: OtTables<'a>,
     pub(crate) aat_tables: AatTables<'a>,
+    font_funcs: FontFuncStorage<'a>,
 }
 
 impl<'a> crate::Shaper<'a> {
@@ -252,6 +272,7 @@ impl<'a> crate::Shaper<'a> {
     }
 
     /// Returns the currently active normalized coordinates.
+    #[inline]
     pub fn coords(&self) -> &'a [NormalizedCoord] {
         self.ot_tables.coords
     }
@@ -338,51 +359,12 @@ impl<'a> crate::Shaper<'a> {
         self.charmap.map_variant(c, vs)
     }
 
-    pub(crate) fn glyph_h_advance(&self, glyph: GlyphId) -> i32 {
-        self.glyph_metrics
-            .advance_width(glyph, self.ot_tables.coords)
-            .unwrap_or_default()
-    }
-    pub(crate) fn glyph_h_advances(&self, buffer: &mut hb_buffer_t) {
-        self.glyph_metrics
-            .populate_advance_widths(buffer, self.ot_tables.coords);
-    }
-
-    pub(crate) fn glyph_v_advance(&self, glyph: GlyphId) -> i32 {
-        -self
-            .glyph_metrics
-            .advance_height(glyph, self.ot_tables.coords)
-            .unwrap_or(self.units_per_em as i32)
-    }
-
-    pub(crate) fn glyph_h_origin(&self, glyph: GlyphId) -> i32 {
-        self.glyph_h_advance(glyph) / 2
-    }
-
-    pub(crate) fn glyph_v_origin(&self, glyph: GlyphId) -> i32 {
-        self.glyph_metrics
-            .v_origin(glyph, self.ot_tables.coords)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn glyph_extents(
-        &self,
-        glyph: GlyphId,
-        glyph_extents: &mut hb_glyph_extents_t,
-    ) -> bool {
-        if let Some(extents) = self.glyph_metrics.extents(glyph, self.ot_tables.coords) {
-            glyph_extents.x_bearing = extents.x_min;
-            glyph_extents.y_bearing = extents.y_max;
-            glyph_extents.width = extents.x_max - extents.x_min;
-            glyph_extents.height = extents.y_min - extents.y_max;
-            true
-        } else {
-            false
-        }
-    }
-
     pub(crate) fn glyph_names(&self) -> GlyphNames<'a> {
         GlyphNames::new(&self.font)
+    }
+
+    pub(crate) fn font_funcs(&self) -> &dyn FontFuncs {
+        &self.font_funcs
     }
 
     pub(crate) fn layout_table(&self, table_index: TableIndex) -> Option<LayoutTable<'a>> {
@@ -412,4 +394,243 @@ pub struct hb_glyph_extents_t {
     pub y_bearing: i32,
     pub width: i32,
     pub height: i32,
+}
+
+/// Custom font functions used while shaping.
+///
+/// See [`ShaperBuilder::font_funcs`] for more.
+pub trait FontFuncs {
+    /// Retrieve the advance width for a specified glyph as a single coordinate value, for horizontal-direction text segments.
+    fn glyph_h_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32;
+    /// Retreive the advance height for a specified glyph as a single coordinate value, for vertical-direction text segments.
+    fn glyph_v_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32;
+
+    /// Populate the [`GlyphPosition`]s' `x_advance` values for each corresponding [`GlyphInfo`], for horizontal-direction text segments.
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    );
+    /// Populate the [`GlyphPosition`]s' `y_advance` values for each corresponding [`GlyphInfo`], for vertical-direction text segments.
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    );
+
+    /// Retrieve the (x, y) coordinates of a glyph's origin, for horizontal-direction text segments.
+    fn glyph_h_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32);
+    /// Retrieve the (x, y) coordinates of a glyph's origin, for vertical-direction text segments.
+    fn glyph_v_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32);
+
+    /// Populate the [`GlyphPosition`]s' `x_offset` and `y_offset` values for each corresponding [`GlyphInfo`], for horizontal-direction text segments.
+    fn glyph_h_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    );
+    /// Populate the [`GlyphPosition`]s' `x_offset` and `y_offset` values for each corresponding [`GlyphInfo`], for vertical-direction text segments.
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    );
+
+    /// Retrieve the kerning adjustment value for a glyph pair, for horizontal segments.
+    fn glyph_h_kerning(&self, font: &crate::Shaper, glyphs: (GlyphId, GlyphId));
+
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents>;
+}
+
+#[derive(Clone)]
+enum FontFuncStorage<'a> {
+    Default(DefaultFontFuncs<'a>),
+    Custom(&'a dyn FontFuncs),
+}
+impl FontFuncs for FontFuncStorage<'_> {
+    fn glyph_h_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_h_advance(font, glyph),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_h_advance(font, glyph),
+        }
+    }
+
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_h_advances(font, info, pos),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_h_advances(font, info, pos),
+        }
+    }
+
+    fn glyph_v_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_v_advance(font, glyph),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_v_advance(font, glyph),
+        }
+    }
+
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_v_advances(font, info, pos),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_v_advances(font, info, pos),
+        }
+    }
+
+    fn glyph_h_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_h_origin(font, glyph),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_h_origin(font, glyph),
+        }
+    }
+
+    fn glyph_v_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_v_origin(font, glyph),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_v_origin(font, glyph),
+        }
+    }
+
+    fn glyph_h_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_h_origins(font, info, pos),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_h_origins(font, info, pos),
+        }
+    }
+
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_v_origins(font, info, pos),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_v_origins(font, info, pos),
+        }
+    }
+
+    fn glyph_h_kerning(&self, font: &crate::Shaper, glyphs: (GlyphId, GlyphId)) {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_h_kerning(font, glyphs),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_h_kerning(font, glyphs),
+        }
+    }
+
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents> {
+        match self {
+            FontFuncStorage::Default(funcs) => funcs.glyph_extents(font, glyph),
+            FontFuncStorage::Custom(funcs) => funcs.glyph_extents(font, glyph),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct DefaultFontFuncs<'a>(GlyphMetrics<'a>);
+impl<'a> DefaultFontFuncs<'a> {
+    pub fn new(font: &FontRef<'a>, shaper_data: &ShaperData) -> Self {
+        Self(GlyphMetrics::new(font, &shaper_data.table_ranges))
+    }
+}
+impl FontFuncs for DefaultFontFuncs<'_> {
+    fn glyph_h_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        self.0
+            .advance_width(glyph, font.coords())
+            .unwrap_or_default()
+    }
+
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        self.0.populate_advance_widths(info, pos, font.coords());
+    }
+
+    fn glyph_v_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        -self
+            .0
+            .advance_height(glyph, font.coords())
+            .unwrap_or(font.units_per_em())
+    }
+
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        self.0.populate_advance_heights(info, pos, font.coords());
+    }
+
+    fn glyph_h_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32) {
+        (0, 0)
+    }
+
+    fn glyph_v_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> (i32, i32) {
+        (
+            self.glyph_h_advance(font, glyph) / 2,
+            self.0.v_origin(glyph, font.coords()).unwrap_or_default(),
+        )
+    }
+
+    fn glyph_h_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        for (info, pos) in info.iter().zip(pos.iter_mut()) {
+            let (x, y) = self.glyph_h_origin(font, info.as_glyph());
+            pos.x_offset = x;
+            pos.y_offset = y;
+        }
+    }
+
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+    ) {
+        for (info, pos) in info.iter().zip(pos.iter_mut()) {
+            let (x, y) = self.glyph_v_origin(font, info.as_glyph());
+            pos.x_offset = x;
+            pos.y_offset = y;
+        }
+    }
+
+    fn glyph_h_kerning(&self, font: &crate::Shaper, glyphs: (GlyphId, GlyphId)) {
+        todo!()
+    }
+
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents> {
+        self.0
+            .extents(glyph, font.coords())
+            .map(|bbox| crate::GlyphExtents {
+                x_bearing: bbox.x_min,
+                y_bearing: bbox.y_max,
+                width: bbox.x_max - bbox.x_min,
+                height: bbox.y_min - bbox.y_max,
+            })
+    }
 }

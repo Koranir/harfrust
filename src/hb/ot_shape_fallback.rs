@@ -131,8 +131,7 @@ fn position_mark(
     base_extents: &mut hb_glyph_extents_t,
     combining_class: u8,
 ) {
-    let mut mark_extents = hb_glyph_extents_t::default();
-    if !face.glyph_extents(glyph, &mut mark_extents) {
+    let Some(mark_extents) = face.font_funcs().glyph_extents(face, glyph) else {
         return;
     };
 
@@ -261,8 +260,7 @@ fn position_around_base(
     let base_pos = &buffer.pos[base];
     let base_glyph = base_info.as_glyph();
 
-    let mut base_extents = hb_glyph_extents_t::default();
-    if !face.glyph_extents(base_glyph, &mut base_extents) {
+    let Some(mut base_extents) = face.font_funcs().glyph_extents(face, base_glyph) else {
         zero_mark_advances(buffer, base + 1, end, adjust_offsets_when_zeroing);
         return;
     };
@@ -273,7 +271,7 @@ fn position_around_base(
     // Use horizontal advance for horizontal positioning.
     // Generally a better idea. Also works for zero-ink glyphs. See:
     // https://github.com/harfbuzz/harfbuzz/issues/1532
-    base_extents.width = face.glyph_h_advance(base_glyph);
+    base_extents.width = face.font_funcs().glyph_h_advance(face, base_glyph);
 
     let lig_id = base_info.lig_id() as u32;
     let num_lig_components = base_info.lig_num_comps() as i32;
@@ -477,9 +475,9 @@ pub fn _hb_ot_shape_fallback_spaces(
                     for u in '0'..='9' {
                         if let Some(glyph) = face.get_nominal_glyph(u as u32) {
                             if horizontal {
-                                pos.x_advance = face.glyph_h_advance(glyph);
+                                pos.x_advance = face.font_funcs().glyph_h_advance(face, glyph);
                             } else {
-                                pos.y_advance = face.glyph_v_advance(glyph);
+                                pos.y_advance = face.font_funcs().glyph_v_advance(face, glyph);
                             }
                             break;
                         }
@@ -493,9 +491,9 @@ pub fn _hb_ot_shape_fallback_spaces(
 
                     if let Some(glyph) = punct {
                         if horizontal {
-                            pos.x_advance = face.glyph_h_advance(glyph);
+                            pos.x_advance = face.font_funcs().glyph_h_advance(face, glyph);
                         } else {
-                            pos.y_advance = face.glyph_v_advance(glyph);
+                            pos.y_advance = face.font_funcs().glyph_v_advance(face, glyph);
                         }
                     }
                 }

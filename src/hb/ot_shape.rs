@@ -429,18 +429,28 @@ fn position(ctx: &mut hb_ot_shape_context_t) {
 
 fn position_default(ctx: &mut hb_ot_shape_context_t) {
     let len = ctx.buffer.len;
+    let ff = ctx.face.font_funcs();
 
     if ctx.buffer.direction.is_horizontal() {
-        ctx.face.glyph_h_advances(ctx.buffer);
+        ff.glyph_h_advances(
+            ctx.face,
+            &ctx.buffer.info[..len],
+            &mut ctx.buffer.pos[..len],
+        );
     } else {
+        ff.glyph_v_advances(
+            ctx.face,
+            &ctx.buffer.info[..len],
+            &mut ctx.buffer.pos[..len],
+        );
         for (info, pos) in ctx.buffer.info[..len]
             .iter()
             .zip(&mut ctx.buffer.pos[..len])
         {
             let glyph = info.as_glyph();
-            pos.y_advance = ctx.face.glyph_v_advance(glyph);
-            pos.x_offset -= ctx.face.glyph_h_origin(glyph);
-            pos.y_offset -= ctx.face.glyph_v_origin(glyph);
+            let (x, y) = ff.glyph_v_origin(ctx.face, glyph);
+            pos.x_offset -= x;
+            pos.y_offset -= y;
         }
     }
 

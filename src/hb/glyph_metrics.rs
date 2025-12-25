@@ -111,8 +111,13 @@ impl<'a> GlyphMetrics<'a> {
         Some(advance)
     }
 
-    pub fn populate_advance_widths(&self, buf: &mut hb_buffer_t, coords: &[F2Dot14]) {
-        for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
+    pub fn populate_advance_widths(
+        &self,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+        coords: &[F2Dot14],
+    ) {
+        for (info, pos) in info.iter().zip(pos.iter_mut()) {
             pos.x_advance = self
                 .h_metrics
                 .get(info.glyph_id as usize)
@@ -123,14 +128,14 @@ impl<'a> GlyphMetrics<'a> {
         }
         if !coords.is_empty() {
             if let Some(hvar) = self.hvar.as_ref() {
-                for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
+                for (info, pos) in info.iter().zip(pos.iter_mut()) {
                     pos.x_advance += hvar
                         .advance_width_delta(info.as_glyph(), coords)
                         .unwrap_or_default()
                         .to_i32();
                 }
             } else {
-                for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
+                for (info, pos) in info.iter().zip(pos.iter_mut()) {
                     if let Some(deltas) = self.phantom_deltas(info.as_glyph(), coords) {
                         pos.x_advance += deltas[1].x.to_i32() - deltas[0].x.to_i32();
                     }
@@ -179,6 +184,38 @@ impl<'a> GlyphMetrics<'a> {
             }
         }
         Some(advance)
+    }
+
+    pub fn populate_advance_heights(
+        &self,
+        info: &[crate::GlyphInfo],
+        pos: &mut [crate::GlyphPosition],
+        coords: &[F2Dot14],
+    ) {
+        for (info, pos) in info.iter().zip(pos.iter_mut()) {
+            pos.y_advance = -self
+                .vmtx
+                .as_ref()
+                .and_then(|vmtx| vmtx.advance(info.as_glyph()))
+                .map(|advance| advance as i32)
+                .unwrap_or_else(|| self.ascent as i32 - self.descent as i32)
+        }
+        if !coords.is_empty() {
+            if let Some(vvar) = self.vvar.as_ref() {
+                for (info, pos) in info.iter().zip(pos.iter_mut()) {
+                    pos.y_advance -= vvar
+                        .advance_height_delta(info.as_glyph(), coords)
+                        .unwrap_or_default()
+                        .to_i32();
+                }
+            } else {
+                for (info, pos) in info.iter().zip(pos.iter_mut()) {
+                    if let Some(deltas) = self.phantom_deltas(info.as_glyph(), coords) {
+                        pos.y_advance -= deltas[3].y.to_i32() - deltas[2].y.to_i32();
+                    }
+                }
+            }
+        }
     }
 
     pub fn top_side_bearing(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {

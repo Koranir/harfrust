@@ -1966,8 +1966,10 @@ impl GlyphBuffer {
             }
 
             if flags.contains(SerializeFlags::GLYPH_EXTENTS) {
-                let mut extents = hb_glyph_extents_t::default();
-                face.glyph_extents(info.as_glyph(), &mut extents);
+                let extents = face
+                    .font_funcs()
+                    .glyph_extents(face, info.as_glyph())
+                    .unwrap_or_default();
                 write!(
                     &mut s,
                     "<{},{},{},{}>",
