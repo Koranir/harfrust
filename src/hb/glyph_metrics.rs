@@ -196,8 +196,10 @@ impl<'a> GlyphMetrics<'a> {
                 .vmtx
                 .as_ref()
                 .and_then(|vmtx| vmtx.advance(info.as_glyph()))
-                .map(|advance| advance as i32)
-                .unwrap_or_else(|| self.ascent as i32 - self.descent as i32)
+                .map_or_else(
+                    || self.ascent as i32 - self.descent as i32,
+                    |advance| advance as i32,
+                );
         }
         if !coords.is_empty() {
             if let Some(vvar) = self.vvar.as_ref() {

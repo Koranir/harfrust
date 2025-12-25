@@ -244,7 +244,7 @@ impl<'a> ShaperBuilder<'a> {
                         &self.data.table_ranges,
                     )))
                 },
-                |f| FontFuncStorage::Custom(f),
+                FontFuncStorage::Custom,
             ),
             font,
         }
@@ -453,6 +453,10 @@ pub trait FontFuncs {
     fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents>;
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "This allows us to skip an allocation"
+)]
 #[derive(Clone)]
 enum FontFuncStorage<'a> {
     Default(DefaultFontFuncs<'a>),
