@@ -28,7 +28,7 @@ mod cache;
 mod charmap;
 pub mod common;
 pub mod face;
-mod glyph_metrics;
+pub(crate) mod glyph_metrics;
 mod glyph_names;
 mod kerning;
 mod machine_cursor;

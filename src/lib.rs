@@ -23,7 +23,10 @@ pub use read_fonts::{types::Tag, FontRef};
 
 pub use hb::buffer::{GlyphBuffer, GlyphInfo, GlyphPosition, UnicodeBuffer};
 pub use hb::common::{script, Direction, Feature, Language, Script, Variation};
-pub use hb::face::{hb_font_t as Shaper, ShaperBuilder, ShaperData, ShaperInstance};
+pub use hb::face::{
+    hb_font_t as Shaper, FontFuncs, ShaperBuilder, ShaperData, ShaperInstance, SyntheticFontFuncs,
+};
+pub use hb::glyph_metrics::OtFontFuncs as DefaultFontFuncs;
 pub use hb::ot_shape_plan::{hb_ot_shape_plan_t as ShapePlan, ShapePlanKey};
 
 /// Type alias for a normalized variation coordinate.

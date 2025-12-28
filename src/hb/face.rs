@@ -4,19 +4,18 @@ use smallvec::SmallVec;
 
 use super::aat::AatTables;
 use super::charmap::{cache_t as cmap_cache_t, Charmap};
-use super::glyph_metrics::GlyphMetrics;
 use super::glyph_names::GlyphNames;
 use super::ot::{LayoutTable, OtCache, OtTables};
 use super::ot_layout::TableIndex;
 use super::ot_shape::{hb_ot_shape_context_t, shape_internal};
 use crate::hb::aat::AatCache;
-use crate::hb::buffer::hb_buffer_t;
+use crate::hb::glyph_metrics::OtFontFuncs;
 use crate::hb::tables::TableRanges;
 use crate::{script, Feature, GlyphBuffer, NormalizedCoord, ShapePlan, UnicodeBuffer, Variation};
 
 /// Data required for shaping with a single font.
 pub struct ShaperData {
-    table_ranges: TableRanges,
+    pub(crate) table_ranges: TableRanges,
     ot_cache: OtCache,
     aat_cache: AatCache,
     cmap_cache: cmap_cache_t,
@@ -45,6 +44,7 @@ impl ShaperData {
             font: font.clone(),
             instance: None,
             point_size: None,
+            class: None,
         }
     }
 }
@@ -183,6 +183,7 @@ pub struct ShaperBuilder<'a> {
     font: FontRef<'a>,
     instance: Option<&'a ShaperInstance>,
     point_size: Option<f32>,
+    class: Option<hb_font_funcs_t<'a>>,
 }
 
 impl<'a> ShaperBuilder<'a> {
@@ -202,12 +203,26 @@ impl<'a> ShaperBuilder<'a> {
         self
     }
 
+    /// Sets custom font functions for the shaper.
+    ///
+    /// This allows processes like glyph hinting that effect glyph metrics to be recognised by the shaper.
+    pub fn font_funcs<T: FontFuncs + 'a>(self, funcs: T) -> Self {
+        self.font_funcs_boxed(std::sync::Arc::new(funcs))
+    }
+
+    /// Sets custom font functions for the shaper.
+    ///
+    /// This allows processes like glyph hinting that effect glyph metrics to be recognised by the shaper.
+    pub fn font_funcs_boxed(mut self, class: hb_font_funcs_t<'a>) -> Self {
+        self.class = Some(class);
+        self
+    }
+
     /// Builds the shaper with the current configuration.
     pub fn build(self) -> crate::Shaper<'a> {
         let font = self.font;
         let units_per_em = self.data.table_ranges.units_per_em;
         let charmap = Charmap::new(&font, &self.data.table_ranges, &self.data.cmap_cache);
-        let glyph_metrics = GlyphMetrics::new(&font, &self.data.table_ranges);
         let (coords, feature_variations) = self
             .instance
             .map(|instance| (instance.coords(), instance.feature_variations))
@@ -220,16 +235,157 @@ impl<'a> ShaperBuilder<'a> {
             feature_variations,
         );
         let aat_tables = AatTables::new(&font, &self.data.aat_cache, &self.data.table_ranges);
+        let class = self
+            .class
+            .unwrap_or_else(|| std::sync::Arc::new(OtFontFuncs::new(&font, self.data)));
         hb_font_t {
             font,
             units_per_em,
             points_per_em: self.point_size,
             charmap,
-            glyph_metrics,
             ot_tables,
             aat_tables,
+            class,
         }
     }
+}
+
+fn delegate_to_multi<F: FontFuncs + ?Sized, O>(
+    f: fn(&F, &crate::Shaper, &[crate::GlyphInfo], &mut [crate::GlyphPosition]),
+    ff: &F,
+    font: &crate::Shaper,
+    glyph: GlyphId,
+    m: impl FnOnce(crate::GlyphPosition) -> O,
+) -> O {
+    let mut info = crate::GlyphInfo::default();
+    let mut pos = crate::GlyphPosition::default();
+    info.glyph_id = glyph.to_u32();
+    f(
+        ff,
+        font,
+        std::slice::from_ref(&info),
+        std::slice::from_mut(&mut pos),
+    );
+    m(pos)
+}
+fn delegate_to_multires<F: FontFuncs + ?Sized, O>(
+    f: fn(&F, &crate::Shaper, &[crate::GlyphInfo], &mut [crate::GlyphPosition]) -> Result<(), ()>,
+    ff: &F,
+    font: &crate::Shaper,
+    glyph: GlyphId,
+    m: impl FnOnce(crate::GlyphPosition) -> O,
+) -> Result<O, ()> {
+    let mut info = crate::GlyphInfo::default();
+    let mut pos = crate::GlyphPosition::default();
+    info.glyph_id = glyph.to_u32();
+    f(
+        ff,
+        font,
+        std::slice::from_ref(&info),
+        std::slice::from_mut(&mut pos),
+    )?;
+    Ok(m(pos))
+}
+
+// TODO: Investigate using a custom `Cow<'a, dyn FontFuncs>` here.
+type hb_font_funcs_t<'a> = std::sync::Arc<dyn FontFuncs + 'a>;
+
+/// A set of font functions used by the shaper to retrieve glyph metrics and other font data.
+///
+/// These functions should be overriden to reflect any modifications to the font metrics, such as hinting, that are applied per-glyph.
+pub trait FontFuncs {
+    // HarfBuzz doesn't use the line extents functions. They can be retreived from Skrifa/Read-Fonts if needed.
+    // fn font_h_extents(&self, font: &crate::Shaper) -> Option<hb_font_extents_t>;
+    // fn font_v_extents(&self, font: &crate::Shaper) -> Option<hb_font_extents_t>;
+
+    // I don't think these will need to be overriden by a consumer. We only support Read-Fonts as a backend.
+    // fn nominal_glyph(&self, font: &crate::Shaper, codepoint: char) -> Option<GlyphId>;
+    // fn nominal_glyphs(
+    //     &self,
+    //     font: &crate::Shaper,
+    //     count: usize,
+    //     codepoint: &mut dyn FnMut(usize) -> Option<u32>,
+    //     glyph: &mut dyn FnMut(usize, GlyphId) -> bool,
+    // ) -> usize;
+    // fn variation_glyph(
+    //     &self,
+    //     font: &crate::Shaper,
+    //     codepoint: char,
+    //     variation_selector: char,
+    // ) -> Option<GlyphId>;
+
+    /// Retrieve the advance for a specific glyph, in horizontal-direction text segments. Returns a value in font coordinates.
+    fn glyph_h_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        delegate_to_multi(Self::glyph_h_advances, self, font, glyph, |p| p.x_advance)
+    }
+    /// Retrieve the advance for a specific glyph, in vertical-direction text segments. Returns a value in font coordinates.
+    fn glyph_v_advance(&self, font: &crate::Shaper, glyph: GlyphId) -> i32 {
+        delegate_to_multi(Self::glyph_v_advances, self, font, glyph, |p| p.y_advance)
+    }
+    /// Retrieve the advances for a specific sequence of glyphs into `advance[n].x_advance`, in horizontal-direction text segments.
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    );
+    /// Retrieve the advances for a specific sequence of glyphs into `advance[n].y_advance`, in vertical-direction text segments.
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    );
+
+    /// Retrieve the (x, y) coordinates of the origin for a glyph, for horizontal-direction text segments.
+    fn glyph_h_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> Result<(i32, i32), ()> {
+        delegate_to_multires(Self::glyph_h_origins, self, font, glyph, |p| {
+            (p.x_offset, p.y_offset)
+        })
+    }
+    /// Retrieve the (x, y) coordinates of the origin for a glyph, for vertical-direction text segments.
+    fn glyph_v_origin(&self, font: &crate::Shaper, glyph: GlyphId) -> Result<(i32, i32), ()> {
+        delegate_to_multires(Self::glyph_v_origins, self, font, glyph, |p| {
+            (p.x_offset, p.y_offset)
+        })
+    }
+    /// Retrieve the origins for a specific sequence of glyphs into `origin[n].{x,y}_offset`, for horizontal-direction text segments.
+    fn glyph_h_origins(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()>;
+    /// Retrieve the origins for a specific sequence of glyphs into `origin[n].{x,y}_offset`, for vertical-direction text segments.
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()>;
+
+    /// Flag if the values returned by `glyph_h_origins` won't always be `(0, 0)`.
+    fn non_default_h_origins(&self, font: &crate::Shaper) -> bool;
+
+    // Deprecated in HarfBuzz
+
+    // fn glyph_h_kerning(
+    //     &self,
+    //     font: &crate::Shaper,
+    //     first_glyph: GlyphId,
+    //     second_glyph: GlyphId,
+    // ) -> i32;
+    // fn glyph_v_kerning(
+    //     &self,
+    //     font: &crate::Shaper,
+    //     first_glyph: GlyphId,
+    //     second_glyph: GlyphId,
+    // ) -> i32;
+
+    /// Retrieve the extents for a specified glyph.
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<hb_glyph_extents_t>;
+
+    // HarfBuzz has some more cosmetic/draw functions that are better off done by Skrifa/Read-Fonts.
 }
 
 /// A configured shaper.
@@ -239,9 +395,9 @@ pub struct hb_font_t<'a> {
     pub(crate) units_per_em: u16,
     pub(crate) points_per_em: Option<f32>,
     charmap: Charmap<'a>,
-    glyph_metrics: GlyphMetrics<'a>,
     pub(crate) ot_tables: OtTables<'a>,
     pub(crate) aat_tables: AatTables<'a>,
+    class: hb_font_funcs_t<'a>,
 }
 
 impl<'a> crate::Shaper<'a> {
@@ -339,45 +495,116 @@ impl<'a> crate::Shaper<'a> {
     }
 
     pub(crate) fn glyph_h_advance(&self, glyph: GlyphId) -> i32 {
-        self.glyph_metrics
-            .advance_width(glyph, self.ot_tables.coords)
-            .unwrap_or_default()
-    }
-    pub(crate) fn glyph_h_advances(&self, buffer: &mut hb_buffer_t) {
-        self.glyph_metrics
-            .populate_advance_widths(buffer, self.ot_tables.coords);
+        self.class.glyph_h_advance(self, glyph)
     }
 
     pub(crate) fn glyph_v_advance(&self, glyph: GlyphId) -> i32 {
-        -self
-            .glyph_metrics
-            .advance_height(glyph, self.ot_tables.coords)
-            .unwrap_or(self.units_per_em as i32)
+        self.class.glyph_v_advance(self, glyph)
     }
 
-    pub(crate) fn glyph_h_origin(&self, glyph: GlyphId) -> i32 {
-        self.glyph_h_advance(glyph) / 2
-    }
-
-    pub(crate) fn glyph_v_origin(&self, glyph: GlyphId) -> i32 {
-        self.glyph_metrics
-            .v_origin(glyph, self.ot_tables.coords)
-            .unwrap_or_default()
-    }
-
-    pub(crate) fn glyph_extents(
+    pub(crate) fn glyph_h_advances(
         &self,
-        glyph: GlyphId,
-        glyph_extents: &mut hb_glyph_extents_t,
-    ) -> bool {
-        if let Some(extents) = self.glyph_metrics.extents(glyph, self.ot_tables.coords) {
-            glyph_extents.x_bearing = extents.x_min;
-            glyph_extents.y_bearing = extents.y_max;
-            glyph_extents.width = extents.x_max - extents.x_min;
-            glyph_extents.height = extents.y_min - extents.y_max;
-            true
-        } else {
-            false
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        self.class.glyph_h_advances(self, glyph, advance);
+    }
+
+    pub(crate) fn glyph_v_advances(
+        &self,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        self.class.glyph_v_advances(self, glyph, advance);
+    }
+
+    /* pub(crate) fn glyph_h_origin(&self, glyph: GlyphId) -> Result<(i32, i32), ()> {
+        self.class.glyph_h_origin(self, glyph)
+    }
+
+    pub(crate) fn glyph_v_origin(&self, glyph: GlyphId) -> Result<(i32, i32), ()> {
+        self.class.glyph_v_origin(self, glyph)
+    } */
+
+    pub(crate) fn non_default_h_origins(&self) -> bool {
+        self.class.non_default_h_origins(self)
+    }
+
+    pub(crate) fn glyph_h_origins(
+        &self,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        self.class.glyph_h_origins(self, glyph, origin)
+    }
+
+    pub(crate) fn glyph_v_origins(
+        &self,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        self.class.glyph_v_origins(self, glyph, origin)
+    }
+
+    pub(crate) fn glyph_extents(&self, glyph: GlyphId) -> Option<hb_glyph_extents_t> {
+        self.class.glyph_extents(self, glyph)
+    }
+
+    pub(crate) fn apply_glyph_origins_with_fallback<const VERTICAL: bool>(
+        &self,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+        mult: i32,
+    ) {
+        // let has_ascender = false;
+        // let ascender = 0;
+
+        let mut origin_scratch = [crate::GlyphPosition::default(); 32];
+        let mut offset = 0;
+        let count = glyph.len();
+        while offset < count {
+            let len = std::cmp::min(count - offset, origin_scratch.len());
+
+            if let Err(()) = if VERTICAL {
+                Self::glyph_v_origins
+            } else {
+                Self::glyph_h_origins
+            }(
+                self,
+                &glyph[offset..offset + len],
+                &mut origin_scratch[offset..offset + len],
+            ) {
+                // TODO: Implement fallback
+                // match if VERTICAL { self.glyph_h_origins } else { self.glyph_v_origins } (
+                //     self,
+                //     &glyph[offset..offset + len],
+                //     &mut origin_scratch[offset..offset + len],
+                // ) {
+                //     Ok(()) => {
+                //     }
+                //     Err(()) => {
+                //         origin_scratch[..len].fill(crate::GlyphPosition::default());
+                //     }
+                // }
+            }
+
+            match mult {
+                1 => {
+                    for i in 0..len {
+                        origin[offset + i].x_offset += origin_scratch[i].x_offset;
+                        origin[offset + i].y_offset += origin_scratch[i].y_offset;
+                    }
+                }
+                -1 => {
+                    for i in 0..len {
+                        origin[offset + i].x_offset -= origin_scratch[i].x_offset;
+                        origin[offset + i].y_offset -= origin_scratch[i].y_offset;
+                    }
+                }
+                _ => unreachable!(),
+            }
+
+            offset += len;
         }
     }
 
@@ -412,4 +639,157 @@ pub struct hb_glyph_extents_t {
     pub y_bearing: i32,
     pub width: i32,
     pub height: i32,
+}
+
+/// Adjusts font metrics for synthetic slant/emboldening, wrapping another [`FontFuncs`] implementation.
+pub struct SyntheticFontFuncs<T> {
+    /// The wrapped font function implementation.
+    pub base: T,
+
+    /// The horizontal emboldening strength.
+    pub x_strength: i32,
+    /// The vertical emboldening strength.
+    pub y_strength: i32,
+    /// If true, the emboldening is applied in-place, without changing the glyph advances.
+    pub embolden_in_place: bool,
+
+    /// The slant ratio.
+    pub slant: f32,
+}
+impl<T> SyntheticFontFuncs<T> {
+    /// Creates new synthetic font functions wrapping the given base implementation, accounting for emboldening.
+    ///
+    /// - `embolden_in_place`: If true, the emboldening is applied in-place, without changing the glyph advances.
+    pub fn new_bold(base: T, x_strength: i32, y_strength: i32, embolden_in_place: bool) -> Self {
+        Self {
+            base,
+            x_strength,
+            y_strength,
+            embolden_in_place,
+            slant: 0.0,
+        }
+    }
+
+    /// Creates new synthetic font functions wrapping the given base implementation, accounting for slanting.
+    ///
+    /// - `slant`: The slant ratio, where a 0.2 slant would result in a point 1 unit up being shifted horizontally by 0.2 units.
+    pub fn new_slant(base: T, slant: f32) -> Self {
+        Self {
+            base,
+            x_strength: 0,
+            y_strength: 0,
+            embolden_in_place: false,
+            slant,
+        }
+    }
+}
+impl<T: FontFuncs> FontFuncs for SyntheticFontFuncs<T> {
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        self.base.glyph_h_advances(font, glyph, advance);
+
+        if self.x_strength != 0 && !self.embolden_in_place {
+            for pos in advance.iter_mut().filter(|p| p.x_advance != 0) {
+                pos.x_advance += self.x_strength;
+            }
+        }
+    }
+
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        self.base.glyph_v_advances(font, glyph, advance);
+
+        if self.y_strength != 0 && !self.embolden_in_place {
+            for pos in advance.iter_mut().filter(|p| p.y_advance != 0) {
+                pos.y_advance += self.y_strength;
+            }
+        }
+    }
+
+    fn glyph_h_origins(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        self.base.glyph_h_origins(font, glyph, origin)?;
+
+        for pos in origin.iter_mut() {
+            if !self.embolden_in_place {
+                pos.x_offset += self.x_strength;
+                pos.y_offset += self.y_strength;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn non_default_h_origins(&self, font: &crate::Shaper) -> bool {
+        self.base.non_default_h_origins(font) || !self.embolden_in_place
+    }
+
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        self.base.glyph_v_origins(font, glyph, origin)?;
+
+        for pos in origin.iter_mut() {
+            if !self.embolden_in_place {
+                pos.x_offset += self.x_strength;
+                pos.y_offset += self.y_strength;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<hb_glyph_extents_t> {
+        // HarfRust doesn't support drawing glyph outlines yet, so we can't get perfectly accurate synthesised extents.
+
+        let mut extents = self.base.glyph_extents(font, glyph)?;
+
+        if self.slant != 0.0 {
+            let mut x1 = extents.x_bearing;
+            let y1 = extents.y_bearing;
+            let mut x2 = extents.x_bearing + extents.width;
+            let y2 = extents.y_bearing + extents.height;
+
+            x1 += std::cmp::min_by(
+                y1 as f32 * self.slant,
+                y2 as f32 * self.slant,
+                f32::total_cmp,
+            )
+            .floor() as i32;
+            x2 += std::cmp::max_by(
+                y1 as f32 * self.slant,
+                y2 as f32 * self.slant,
+                f32::total_cmp,
+            )
+            .ceil() as i32;
+
+            extents.x_bearing = x1;
+            extents.width = x2 - x1;
+        }
+
+        if self.x_strength != 0 || self.y_strength != 0 {
+            extents.y_bearing += self.y_strength;
+            extents.height -= self.y_strength;
+
+            extents.x_bearing -= self.x_strength / 2;
+            extents.width += self.x_strength;
+        }
+
+        Some(extents)
+    }
 }

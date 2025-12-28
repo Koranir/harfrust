@@ -131,8 +131,7 @@ fn position_mark(
     base_extents: &mut hb_glyph_extents_t,
     combining_class: u8,
 ) {
-    let mut mark_extents = hb_glyph_extents_t::default();
-    if !face.glyph_extents(glyph, &mut mark_extents) {
+    let Some(mark_extents) = face.glyph_extents(glyph) else {
         return;
     };
 
@@ -261,8 +260,7 @@ fn position_around_base(
     let base_pos = &buffer.pos[base];
     let base_glyph = base_info.as_glyph();
 
-    let mut base_extents = hb_glyph_extents_t::default();
-    if !face.glyph_extents(base_glyph, &mut base_extents) {
+    let Some(mut base_extents) = face.glyph_extents(base_glyph) else {
         zero_mark_advances(buffer, base + 1, end, adjust_offsets_when_zeroing);
         return;
     };

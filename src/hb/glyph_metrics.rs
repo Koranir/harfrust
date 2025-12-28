@@ -1,4 +1,4 @@
-use crate::hb::buffer::hb_buffer_t;
+use crate::hb::face::{hb_glyph_extents_t, FontFuncs};
 use crate::{hb::tables::TableRanges, Tag};
 use read_fonts::{
     tables::{
@@ -88,57 +88,6 @@ impl<'a> GlyphMetrics<'a> {
         }
     }
 
-    pub fn advance_width(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {
-        let gid = gid.into();
-        let Some(mut advance) = self
-            .h_metrics
-            .get(gid.to_u32() as usize)
-            .or_else(|| self.h_metrics.last())
-            .map(|metric| metric.advance() as i32)
-        else {
-            return (gid.to_u32() < self.num_glyphs).then_some(self.upem as i32 / 2);
-        };
-        if !coords.is_empty() {
-            if let Some(hvar) = self.hvar.as_ref() {
-                advance += hvar
-                    .advance_width_delta(gid, coords)
-                    .unwrap_or_default()
-                    .to_i32();
-            } else if let Some(deltas) = self.phantom_deltas(gid, coords) {
-                advance += deltas[1].x.to_i32() - deltas[0].x.to_i32();
-            }
-        }
-        Some(advance)
-    }
-
-    pub fn populate_advance_widths(&self, buf: &mut hb_buffer_t, coords: &[F2Dot14]) {
-        for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
-            pos.x_advance = self
-                .h_metrics
-                .get(info.glyph_id as usize)
-                .or_else(|| self.h_metrics.last())
-                .map(|metric| metric.advance() as i32)
-                .or_else(|| (info.glyph_id < self.num_glyphs).then_some(self.upem as i32 / 2))
-                .unwrap_or_default();
-        }
-        if !coords.is_empty() {
-            if let Some(hvar) = self.hvar.as_ref() {
-                for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
-                    pos.x_advance += hvar
-                        .advance_width_delta(info.as_glyph(), coords)
-                        .unwrap_or_default()
-                        .to_i32();
-                }
-            } else {
-                for (info, pos) in buf.info.iter().zip(buf.pos.iter_mut()) {
-                    if let Some(deltas) = self.phantom_deltas(info.as_glyph(), coords) {
-                        pos.x_advance += deltas[1].x.to_i32() - deltas[0].x.to_i32();
-                    }
-                }
-            }
-        }
-    }
-
     pub fn _left_side_bearing(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {
         let gid = gid.into();
         let mut bearing = if let Some(hmtx) = self._hmtx.as_ref() {
@@ -158,29 +107,6 @@ impl<'a> GlyphMetrics<'a> {
         Some(bearing)
     }
 
-    pub fn advance_height(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {
-        let gid = gid.into();
-        let Some(mut advance) = self
-            .vmtx
-            .as_ref()
-            .and_then(|vmtx| vmtx.advance(gid))
-            .map(|advance| advance as i32)
-        else {
-            return Some(self.ascent as i32 - self.descent as i32);
-        };
-        if !coords.is_empty() {
-            if let Some(vvar) = self.vvar.as_ref() {
-                advance += vvar
-                    .advance_height_delta(gid, coords)
-                    .unwrap_or_default()
-                    .to_i32();
-            } else if let Some(deltas) = self.phantom_deltas(gid, coords) {
-                advance += deltas[3].y.to_i32() - deltas[2].y.to_i32();
-            }
-        }
-        Some(advance)
-    }
-
     pub fn top_side_bearing(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {
         let gid = gid.into();
         let mut bearing = if let Some(vmtx) = self.vmtx.as_ref() {
@@ -196,68 +122,6 @@ impl<'a> GlyphMetrics<'a> {
             }
         }
         Some(bearing)
-    }
-
-    pub fn v_origin(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<i32> {
-        let gid = gid.into();
-        let origin = if let Some(vorg) = self.vorg.as_ref() {
-            let mut origin = vorg.vertical_origin_y(gid) as i32;
-            if !coords.is_empty() {
-                if let Some(vvar) = self.vvar.as_ref() {
-                    origin += vvar.v_org_delta(gid, coords).unwrap_or_default().to_i32();
-                }
-            }
-            origin
-        } else if let Some(extents) = self.extents(gid, coords) {
-            let origin = if self.vmtx.is_some() {
-                let mut origin = Some(extents.y_max);
-                let tsb = self.top_side_bearing(gid, coords);
-                if let Some(tsb) = tsb {
-                    origin = Some(origin.unwrap() + tsb);
-                } else {
-                    origin = None;
-                }
-                if origin.is_some() && !coords.is_empty() {
-                    if let Some(vvar) = self.vvar.as_ref() {
-                        origin = Some(
-                            origin.unwrap()
-                                + vvar.v_org_delta(gid, coords).unwrap_or_default().to_i32(),
-                        );
-                    }
-                }
-                origin
-            } else {
-                None
-            };
-
-            if let Some(origin) = origin {
-                origin
-            } else {
-                let mut advance = self.ascent as i32 - self.descent as i32;
-                if let Some(mvar) = self.mvar.as_ref() {
-                    advance += mvar
-                        .metric_delta(Tag::new(b"hasc"), coords)
-                        .unwrap_or_default()
-                        .to_i32()
-                        - mvar
-                            .metric_delta(Tag::new(b"hdsc"), coords)
-                            .unwrap_or_default()
-                            .to_i32();
-                }
-                let diff = advance - (extents.y_max - extents.y_min);
-                extents.y_max + (diff >> 1)
-            }
-        } else {
-            let mut ascent = self.ascent as i32;
-            if let Some(mvar) = self.mvar.as_ref() {
-                ascent += mvar
-                    .metric_delta(Tag::new(b"hasc"), coords)
-                    .unwrap_or_default()
-                    .to_i32();
-            }
-            ascent
-        };
-        Some(origin)
     }
 
     pub fn extents(&self, gid: impl Into<GlyphId>, coords: &[F2Dot14]) -> Option<BoundingBox<i32>> {
@@ -284,5 +148,208 @@ impl<'a> GlyphMetrics<'a> {
         let gvar = glyf.gvar.as_ref()?;
         gvar.phantom_point_deltas(&glyf.glyf, &glyf.loca, coords, gid)
             .ok()?
+    }
+}
+
+/// A default set of font functions, using the builtin glyph metrics tables.
+///
+/// If you use hinting or any other process that modifies glyph metrics,
+/// you should create your own [`FontFuncs`](crate::FontFuncs) implementation instead of using this struct,
+/// otherwise the rendered and shaped metrics will not be in sync.
+//
+// `hb_ot_font_funcs`, essentially.
+pub struct OtFontFuncs<'a>(GlyphMetrics<'a>);
+impl<'a> OtFontFuncs<'a> {
+    /// Create a default font function set.
+    pub fn new(font: &FontRef<'a>, shaper_data: &crate::ShaperData) -> Self {
+        Self(GlyphMetrics::new(font, &shaper_data.table_ranges))
+    }
+}
+impl FontFuncs for OtFontFuncs<'_> {
+    fn glyph_h_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+            pos.x_advance = self
+                .0
+                .h_metrics
+                .get(info.glyph_id as usize)
+                .or_else(|| self.0.h_metrics.last())
+                .map(|metric| metric.advance() as i32)
+                .or_else(|| (info.glyph_id < self.0.num_glyphs).then_some(self.0.upem as i32 / 2))
+                .unwrap_or_default();
+        }
+        if !font.coords().is_empty() {
+            if let Some(hvar) = self.0.hvar.as_ref() {
+                for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+                    pos.x_advance += hvar
+                        .advance_width_delta(info.as_glyph(), font.coords())
+                        .unwrap_or_default()
+                        .to_i32();
+                }
+            } else {
+                for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+                    if let Some(deltas) = self.0.phantom_deltas(info.as_glyph(), font.coords()) {
+                        pos.x_advance += deltas[1].x.to_i32() - deltas[0].x.to_i32();
+                    }
+                }
+            }
+        }
+    }
+
+    fn glyph_v_advances(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        advance: &mut [crate::GlyphPosition],
+    ) {
+        for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+            pos.y_advance = -self
+                .0
+                .vmtx
+                .as_ref()
+                .and_then(|vmtx| vmtx.advance(info.as_glyph()))
+                .map_or_else(
+                    || self.0.ascent as i32 - self.0.descent as i32,
+                    |advance| advance as i32,
+                );
+        }
+        if !font.coords().is_empty() {
+            if let Some(vvar) = self.0.vvar.as_ref() {
+                for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+                    pos.y_advance -= vvar
+                        .advance_height_delta(info.as_glyph(), font.coords())
+                        .unwrap_or_default()
+                        .to_i32();
+                }
+            } else {
+                for (info, pos) in glyph.iter().zip(advance.iter_mut()) {
+                    if let Some(deltas) = self.0.phantom_deltas(info.as_glyph(), font.coords()) {
+                        pos.y_advance -= deltas[3].y.to_i32() - deltas[2].y.to_i32();
+                    }
+                }
+            }
+        }
+    }
+
+    fn glyph_h_origins(
+        &self,
+        _font: &crate::Shaper,
+        _glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        // Horizontal origins default to (0, 0)
+        for origin in origin {
+            origin.x_offset = 0;
+            origin.y_offset = 0;
+        }
+
+        Ok(())
+    }
+
+    fn non_default_h_origins(&self, _font: &crate::Shaper) -> bool {
+        false
+    }
+
+    fn glyph_v_origins(
+        &self,
+        font: &crate::Shaper,
+        glyph: &[crate::GlyphInfo],
+        origin: &mut [crate::GlyphPosition],
+    ) -> Result<(), ()> {
+        for (info, origin) in glyph.iter().zip(origin.iter_mut()) {
+            origin.x_offset = self.glyph_h_advance(font, info.as_glyph()) / 2;
+        }
+
+        if let Some(vorg) = self.0.vorg.as_ref() {
+            for (info, origin) in glyph.iter().zip(origin.iter_mut()) {
+                origin.y_offset = vorg.vertical_origin_y(info.as_glyph()) as i32;
+            }
+
+            if !font.coords().is_empty() {
+                if let Some(vvar) = self.0.vvar.as_ref() {
+                    for (info, origin) in glyph.iter().zip(origin.iter_mut()) {
+                        origin.y_offset += vvar
+                            .v_org_delta(info.as_glyph(), font.coords())
+                            .unwrap_or_default()
+                            .to_i32();
+                    }
+                }
+            }
+
+            return Ok(());
+        }
+
+        for (info, origin) in glyph.iter().zip(origin.iter_mut()) {
+            if let Some(extents) = self.0.extents(info.as_glyph(), font.coords()) {
+                origin.y_offset = {
+                    let origin = if self.0.vmtx.is_some() {
+                        let mut origin = Some(extents.y_max);
+                        let tsb = self.0.top_side_bearing(info.as_glyph(), font.coords());
+                        if let Some(tsb) = tsb {
+                            origin = Some(origin.unwrap() + tsb);
+                        } else {
+                            origin = None;
+                        }
+                        if origin.is_some() && !font.coords().is_empty() {
+                            if let Some(vvar) = self.0.vvar.as_ref() {
+                                origin = Some(
+                                    origin.unwrap()
+                                        + vvar
+                                            .v_org_delta(info.as_glyph(), font.coords())
+                                            .unwrap_or_default()
+                                            .to_i32(),
+                                );
+                            }
+                        }
+                        origin
+                    } else {
+                        None
+                    };
+
+                    if let Some(origin) = origin {
+                        origin
+                    } else {
+                        let mut advance = self.0.ascent as i32 - self.0.descent as i32;
+                        if let Some(mvar) = self.0.mvar.as_ref() {
+                            advance += mvar
+                                .metric_delta(Tag::new(b"hasc"), font.coords())
+                                .unwrap_or_default()
+                                .to_i32()
+                                - mvar
+                                    .metric_delta(Tag::new(b"hdsc"), font.coords())
+                                    .unwrap_or_default()
+                                    .to_i32();
+                        }
+                        let diff = advance - (extents.y_max - extents.y_min);
+                        extents.y_max + (diff >> 1)
+                    }
+                }
+            } else {
+                origin.y_offset = self.0.ascent as i32;
+                if let Some(mvar) = self.0.mvar.as_ref() {
+                    origin.y_offset += mvar
+                        .metric_delta(Tag::new(b"hasc"), font.coords())
+                        .unwrap_or_default()
+                        .to_i32();
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<hb_glyph_extents_t> {
+        self.0
+            .extents(glyph, font.coords())
+            .map(|e| hb_glyph_extents_t {
+                x_bearing: e.x_min,
+                y_bearing: e.y_max,
+                width: e.x_max - e.x_min,
+                height: e.y_min - e.y_max,
+            })
     }
 }

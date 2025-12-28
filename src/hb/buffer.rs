@@ -5,7 +5,6 @@ use core::convert::TryFrom;
 use read_fonts::types::{GlyphId, GlyphId16};
 
 use super::buffer::glyph_flag::{SAFE_TO_INSERT_TATWEEL, UNSAFE_TO_BREAK, UNSAFE_TO_CONCAT};
-use super::face::hb_glyph_extents_t;
 use super::unicode::CharExt;
 use super::{hb_font_t, hb_mask_t};
 use crate::hb::set_digest::hb_set_digest_t;
@@ -1966,8 +1965,7 @@ impl GlyphBuffer {
             }
 
             if flags.contains(SerializeFlags::GLYPH_EXTENTS) {
-                let mut extents = hb_glyph_extents_t::default();
-                face.glyph_extents(info.as_glyph(), &mut extents);
+                let extents = face.glyph_extents(info.as_glyph()).unwrap_or_default();
                 write!(
                     &mut s,
                     "<{},{},{},{}>",

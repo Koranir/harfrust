@@ -430,18 +430,19 @@ fn position(ctx: &mut hb_ot_shape_context_t) {
 fn position_default(ctx: &mut hb_ot_shape_context_t) {
     let len = ctx.buffer.len;
 
+    let info = &ctx.buffer.info[..len];
+    let pos = &mut ctx.buffer.pos[..len];
+
     if ctx.buffer.direction.is_horizontal() {
-        ctx.face.glyph_h_advances(ctx.buffer);
-    } else {
-        for (info, pos) in ctx.buffer.info[..len]
-            .iter()
-            .zip(&mut ctx.buffer.pos[..len])
-        {
-            let glyph = info.as_glyph();
-            pos.y_advance = ctx.face.glyph_v_advance(glyph);
-            pos.x_offset -= ctx.face.glyph_h_origin(glyph);
-            pos.y_offset -= ctx.face.glyph_v_origin(glyph);
+        ctx.face.glyph_h_advances(info, pos);
+        if ctx.face.non_default_h_origins() {
+            ctx.face
+                .apply_glyph_origins_with_fallback::<false>(info, pos, -1);
         }
+    } else {
+        ctx.face.glyph_v_advances(info, pos);
+        ctx.face
+            .apply_glyph_origins_with_fallback::<true>(info, pos, -1);
     }
 
     if ctx.buffer.scratch_flags & HB_BUFFER_SCRATCH_FLAG_HAS_SPACE_FALLBACK != 0 {
