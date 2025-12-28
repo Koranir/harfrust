@@ -572,7 +572,7 @@ impl<'a> crate::Shaper<'a> {
             }(
                 self,
                 &glyph[offset..offset + len],
-                &mut origin_scratch[offset..offset + len],
+                &mut origin_scratch[..len],
             ) {
                 // TODO: Implement fallback
                 // match if VERTICAL { self.glyph_h_origins } else { self.glyph_v_origins } (
