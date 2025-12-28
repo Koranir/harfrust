@@ -24,7 +24,8 @@ pub use read_fonts::{types::Tag, FontRef};
 pub use hb::buffer::{GlyphBuffer, GlyphInfo, GlyphPosition, UnicodeBuffer};
 pub use hb::common::{script, Direction, Feature, Language, Script, Variation};
 pub use hb::face::{
-    hb_font_t as Shaper, FontFuncs, ShaperBuilder, ShaperData, ShaperInstance, SyntheticFontFuncs,
+    hb_font_t as Shaper, hb_glyph_extents_t as GlyphExtents, FontFuncs, ShaperBuilder, ShaperData,
+    ShaperInstance, SyntheticFontFuncs,
 };
 pub use hb::glyph_metrics::OtFontFuncs as DefaultFontFuncs;
 pub use hb::ot_shape_plan::{hb_ot_shape_plan_t as ShapePlan, ShapePlanKey};

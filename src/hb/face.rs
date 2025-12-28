@@ -383,7 +383,7 @@ pub trait FontFuncs {
     // ) -> i32;
 
     /// Retrieve the extents for a specified glyph.
-    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<hb_glyph_extents_t>;
+    fn glyph_extents(&self, font: &crate::Shaper, glyph: GlyphId) -> Option<crate::GlyphExtents>;
 
     // HarfBuzz has some more cosmetic/draw functions that are better off done by Skrifa/Read-Fonts.
 }
@@ -634,10 +634,17 @@ impl<'a> crate::Shaper<'a> {
 
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
+/// Glyph extent values, measured in font units.
+///
+/// Note that height is negative, in coordinate systems that grow up.
 pub struct hb_glyph_extents_t {
+    /// Distance from the x-origin to the left extremum of the glyph.
     pub x_bearing: i32,
+    /// Distance from the top extremum of the glyph to the y-origin.
     pub y_bearing: i32,
+    /// Distance from the left extremum of the glyph to the right extremum.
     pub width: i32,
+    /// Distance from the top extremum of the glyph to the bottom extremum.
     pub height: i32,
 }
 
